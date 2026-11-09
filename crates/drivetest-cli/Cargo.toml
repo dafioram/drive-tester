@@ -1,0 +1,20 @@
+[package]
+name = "drivetest-cli"
+description = "Command-line front end for Drive Test."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "drivetest"
+path = "src/main.rs"
+
+[dependencies]
+drivetest-core.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+ctrlc = "3.5"
+
+[target.'cfg(windows)'.dependencies]
+drivetest-win.workspace = true

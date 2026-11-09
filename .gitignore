@@ -1,0 +1,17 @@
+# Build output
+/target/
+**/*.rs.bk
+*.pdb
+
+# Reports written by local runs (CLI default outside Windows, or --report-dir)
+/drivetest-reports/
+/reports/
+
+# Editors and OS clutter
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
