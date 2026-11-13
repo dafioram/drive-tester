@@ -50,7 +50,7 @@ impl SystemDisks {
 }
 
 /// Reads a registry value as UTF-16 (REG_SZ or REG_MULTI_SZ).
-fn registry_value(subkey: &str, value: &str, flags: u32) -> Option<Vec<u16>> {
+fn registry_value(subkey: &str, value: &str, flags: u32) -> std::io::Result<Vec<u16>> {
     let (k, v) = (wide(subkey), wide(value));
     let mut buf = vec![0u16; 4096];
     let mut size = (buf.len() * 2) as u32;
@@ -66,17 +66,18 @@ fn registry_value(subkey: &str, value: &str, flags: u32) -> Option<Vec<u16>> {
             &mut size,
         )
     };
-    (status == 0).then(|| {
-        buf.truncate(size as usize / 2);
-        buf
-    })
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32));
+    }
+    buf.truncate(size as usize / 2);
+    Ok(buf)
 }
 
 fn registry_string(subkey: &str, value: &str) -> Option<String> {
-    registry_value(subkey, value, RRF_RT_REG_SZ).map(|b| from_wide(&b)).filter(|s| !s.is_empty())
+    registry_value(subkey, value, RRF_RT_REG_SZ).ok().map(|b| from_wide(&b)).filter(|s| !s.is_empty())
 }
 
-fn registry_multi_string(subkey: &str, value: &str) -> Option<Vec<String>> {
+fn registry_multi_string(subkey: &str, value: &str) -> std::io::Result<Vec<String>> {
     registry_value(subkey, value, RRF_RT_REG_MULTI_SZ)
         .map(|b| b.split(|&c| c == 0).filter(|s| !s.is_empty()).map(String::from_utf16_lossy).collect())
 }
@@ -163,19 +164,38 @@ pub fn detect(volumes: Option<&[VolumeRecord]>, buses: &HashMap<u32, BusType>) -
 
     // 3. Page files the memory manager reports as in use (e.g. "\??\D:\pagefile.sys").
     let mm = "SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Memory Management";
-    for entry in registry_multi_string(mm, "ExistingPageFiles").unwrap_or_default() {
+    let page_files = match registry_multi_string(mm, "ExistingPageFiles") {
+        Ok(files) => files,
+        Err(error) if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32) => Vec::new(),
+        Err(error) => {
+            s.fail(format!("could not read the active page file list ({error})"));
+            Vec::new()
+        }
+    };
+    for entry in page_files {
         let path = entry.trim_start_matches("\\??\\");
         if path.len() >= 2 && path.as_bytes()[1] == b':' {
             let letter = &path[..2];
             match letter_extents(letter) {
-                Ok(ext) => s.add_all(&ext, &format!("holds an active page file ({letter})")),
+                Ok(ext) if !ext.is_empty() => s.add_all(&ext, &format!("holds an active page file ({letter})")),
+                Ok(_) => s.fail(format!("no disk extents for page file volume {letter}")),
                 Err(e) => s.fail(format!("could not locate the page file volume {letter} ({e})")),
             }
+        } else {
+            s.fail(format!("could not resolve active page file path {entry}"));
         }
     }
 
     // 4. Pagefile, hibernation and swap files on every mounted volume.
     for v in volumes.iter().filter(|v| !v.is_irrelevant()) {
+        if !v.mount_points_known {
+            let reason = format!("could not read mount points for {}", v.guid_path);
+            if v.extents_known {
+                s.add_all(&v.extents, &reason);
+            } else {
+                s.fail(reason);
+            }
+        }
         for mount in &v.mount_points {
             for file in ["pagefile.sys", "hiberfil.sys", "swapfile.sys"] {
                 let reason = match presence(&format!("{mount}{file}")) {

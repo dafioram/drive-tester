@@ -7,7 +7,9 @@ use std::thread;
 use std::time::Duration;
 
 use drivetest_core::model::{VolumeExtent, VolumeInfo};
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    ERROR_MORE_DATA, ERROR_NO_MORE_FILES, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     FindFirstVolumeW, FindNextVolumeW, FindVolumeClose, GetDiskFreeSpaceExW, GetDiskFreeSpaceW, GetDriveTypeW,
     GetVolumeInformationW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, GetVolumePathNamesForVolumeNameW,
@@ -37,6 +39,7 @@ pub struct DiskExtent {
 pub struct VolumeRecord {
     pub guid_path: String,
     pub mount_points: Vec<String>,
+    pub mount_points_known: bool,
     pub label: String,
     pub file_system: String,
     pub size_bytes: u64,
@@ -85,31 +88,61 @@ impl VolumeRecord {
 /// Extents for an openable volume path such as `\\.\C:` or a GLOBALROOT device.
 pub fn extents_of(path: &str) -> io::Result<Vec<DiskExtent>> {
     let h = open(path, 0, 0)?;
-    let mut out = vec![0u8; EXTENTS_AT + EXTENT_SIZE * 64];
-    ioctl_out(&h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &mut out)?;
-    let count = u32_at(&out, 0) as usize;
-    Ok((0..count.min(64))
-        .map(|i| {
-            let base = EXTENTS_AT + i * EXTENT_SIZE;
-            DiskExtent {
-                disk: u32_at(&out, base),
-                offset: i64_at(&out, base + EXTENT_OFFSET_AT).max(0) as u64,
-                length: i64_at(&out, base + EXTENT_LENGTH_AT).max(0) as u64,
+    let mut out = vec![0u8; EXTENTS_AT + EXTENT_SIZE * 8];
+    let returned = loop {
+        match ioctl_out(&h, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, &mut out) {
+            Ok(n) => break n as usize,
+            Err(e) if e.raw_os_error() == Some(ERROR_MORE_DATA as i32) => {
+                let count = u32_at(&out, 0) as usize;
+                let required = EXTENTS_AT + EXTENT_SIZE * count;
+                if required <= out.len() || count > 65_536 {
+                    return Err(io::Error::other("Invalid volume extent count"));
+                }
+                out.resize(required, 0);
             }
-        })
-        .collect())
+            Err(e) => return Err(e),
+        }
+    };
+    parse_extents(&out[..returned.min(out.len())])
 }
 
-fn mount_points(guid: &str) -> Vec<String> {
-    let w = wide(guid);
-    let mut buf = vec![0u16; 2048];
-    let mut needed = 0u32;
-    // SAFETY: buffers are valid for the lengths passed.
-    let ok = unsafe { GetVolumePathNamesForVolumeNameW(w.as_ptr(), buf.as_mut_ptr(), buf.len() as u32, &mut needed) };
-    if ok == 0 {
-        return Vec::new();
+fn parse_extents(out: &[u8]) -> io::Result<Vec<DiskExtent>> {
+    if out.len() < EXTENTS_AT {
+        return Err(io::Error::other("Truncated volume extent header"));
     }
-    buf.split(|&c| c == 0).take_while(|s| !s.is_empty()).map(String::from_utf16_lossy).collect()
+    let count = u32_at(out, 0) as usize;
+    if count == 0 || count > (out.len() - EXTENTS_AT) / EXTENT_SIZE {
+        return Err(io::Error::other("Incomplete volume extent data"));
+    }
+    (0..count)
+        .map(|i| {
+            let base = EXTENTS_AT + i * EXTENT_SIZE;
+            let offset = i64_at(out, base + EXTENT_OFFSET_AT);
+            let length = i64_at(out, base + EXTENT_LENGTH_AT);
+            if offset < 0 || length <= 0 {
+                return Err(io::Error::other("Invalid volume extent bounds"));
+            }
+            Ok(DiskExtent { disk: u32_at(out, base), offset: offset as u64, length: length as u64 })
+        })
+        .collect()
+}
+
+fn mount_points(guid: &str) -> io::Result<Vec<String>> {
+    let w = wide(guid);
+    let mut buf = vec![0u16; 512];
+    loop {
+        let mut needed = 0u32;
+        let ok =
+            unsafe { GetVolumePathNamesForVolumeNameW(w.as_ptr(), buf.as_mut_ptr(), buf.len() as u32, &mut needed) };
+        if ok != 0 {
+            return Ok(buf.split(|&c| c == 0).take_while(|s| !s.is_empty()).map(String::from_utf16_lossy).collect());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_MORE_DATA as i32) || needed as usize <= buf.len() {
+            return Err(error);
+        }
+        buf.resize(needed as usize, 0);
+    }
 }
 
 fn label_and_fs(guid: &str) -> (String, String) {
@@ -189,16 +222,19 @@ pub fn list_volumes() -> io::Result<Vec<VolumeRecord>> {
     if find == INVALID_HANDLE_VALUE || find.is_null() {
         return Err(io::Error::last_os_error());
     }
-    loop {
+    let result = loop {
         let guid = from_wide(&name);
         let mounts = mount_points(&guid);
+        let mounts_known = mounts.is_ok();
+        let mounts = mounts.unwrap_or_default();
         let (label, file_system) = label_and_fs(&guid);
         let (size_bytes, free_bytes) = space(&guid).unwrap_or((0, 0));
         let extents = extents_of(guid.trim_end_matches('\\'));
-        let drive_type = mounts.first().map_or(0, |m| drive_type(m));
+        let drive_type = drive_type(mounts.first().unwrap_or(&guid));
         records.push(VolumeRecord {
             guid_path: guid,
             mount_points: mounts,
+            mount_points_known: mounts_known,
             label,
             file_system,
             size_bytes,
@@ -209,12 +245,16 @@ pub fn list_volumes() -> io::Result<Vec<VolumeRecord>> {
         });
         // SAFETY: `find` is a valid search handle; `name` is valid.
         if unsafe { FindNextVolumeW(find, name.as_mut_ptr(), name.len() as u32) } == 0 {
-            break;
+            let error = io::Error::last_os_error();
+            break match error.raw_os_error() {
+                Some(code) if code == ERROR_NO_MORE_FILES as i32 => Ok(records),
+                _ => Err(error),
+            };
         }
-    }
+    };
     // SAFETY: closing the search handle we opened.
     unsafe { FindVolumeClose(find) };
-    Ok(records)
+    result
 }
 
 /// Volumes locked and dismounted for a destructive test. Unlocked on drop.
@@ -240,6 +280,9 @@ pub fn lock_and_dismount(disk: u32) -> io::Result<VolumeLocks> {
         return Err(io::Error::other(format!(
             "could not tell which disk volume {name} is on, so it cannot be ruled out"
         )));
+    }
+    if volumes.iter().any(|v| v.on_disk(disk) && v.extents.iter().any(|e| e.disk != disk)) {
+        return Err(io::Error::other("The target is part of a multi-disk volume"));
     }
     for v in volumes.into_iter().filter(|v| v.on_disk(disk)) {
         let name = v.mount_points.first().cloned().unwrap_or_else(|| v.guid_path.clone());
