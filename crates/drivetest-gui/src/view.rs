@@ -78,6 +78,7 @@ pub struct LiveView {
     pub log: VecDeque<String>,
     /// Exact statistics from a finished report.
     pub exact: Option<LatencyStats>,
+    pub reported_curve: Option<Vec<f64>>,
 }
 
 impl Default for LiveView {
@@ -98,6 +99,7 @@ impl Default for LiveView {
             temps: Vec::new(),
             log: VecDeque::new(),
             exact: None,
+            reported_curve: None,
         }
     }
 }
@@ -180,17 +182,25 @@ impl LiveView {
     }
 
     pub fn curve(&self) -> Vec<f64> {
+        if let Some(curve) = &self.reported_curve {
+            return curve.clone();
+        }
         self.seg_bytes.iter().zip(&self.seg_secs).map(|(b, s)| if *s > 0.0 { b / 1e6 / s } else { 0.0 }).collect()
     }
 
     fn load_map(&mut self, name: &str, map: &BlockMap) {
         self.start_pass(name, map.total_blocks(), map.block_size);
-        let updates: Vec<BlockUpdate> = (0..map.total_blocks())
-            .filter_map(|i| {
-                let (latency_us, status) = map.get(i);
-                (status != BlockStatus::NotScanned).then_some(BlockUpdate { index: i, latency_us, status })
-            })
-            .collect();
+        let mut updates = Vec::with_capacity(1024);
+        for i in 0..map.total_blocks() {
+            let (latency_us, status) = map.get(i);
+            if status != BlockStatus::NotScanned {
+                updates.push(BlockUpdate { index: i, latency_us, status });
+                if updates.len() == 1024 {
+                    self.apply(&updates);
+                    updates.clear();
+                }
+            }
+        }
         self.apply(&updates);
     }
 
@@ -200,6 +210,9 @@ impl LiveView {
         if let Some(s) = &report.scan {
             v.load_map("Read scan (finished)", &s.blocks);
             v.exact = Some(s.latency.clone());
+            v.buckets = s.bucket_counts;
+            v.zero_blocks = s.zero_blocks;
+            v.reported_curve = Some(s.speed_curve_mb_s.clone());
         } else if let Some(w) = &report.write_test {
             match &w.verify_blocks {
                 Some(map) => v.load_map("Verify pass (finished)", map),

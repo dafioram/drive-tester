@@ -55,11 +55,24 @@ pub struct ScanConfig {
     pub pinpoint_errors: bool,
     /// Seed for random sampling.
     pub seed: u64,
+    /// Keep every block in the report. Large exports are rejected before allocating.
+    #[serde(default)]
+    pub dense: bool,
+    #[serde(default)]
+    pub exclude_zero_from_throughput: bool,
 }
 
 impl Default for ScanConfig {
     fn default() -> Self {
-        Self { mode: ScanMode::Sequential, block_size: 1 << 20, retries: 2, pinpoint_errors: true, seed: 0x5EED }
+        Self {
+            mode: ScanMode::Sequential,
+            block_size: 1 << 20,
+            retries: 2,
+            pinpoint_errors: true,
+            seed: 0x5EED,
+            dense: false,
+            exclude_zero_from_throughput: false,
+        }
     }
 }
 
@@ -173,45 +186,48 @@ impl BlockMap {
 }
 
 /// Order of block indices for a scan mode.
-pub fn block_order(mode: &ScanMode, map: &BlockMap, seed: u64) -> Vec<u64> {
-    let n = map.total_blocks();
-    if n == 0 {
-        return Vec::new();
-    }
+fn scan_order(mode: &ScanMode, n: u64, bs: u64, seed: u64) -> (u64, Box<dyn Iterator<Item = u64>>) {
     match mode {
-        ScanMode::Sequential => (0..n).collect(),
+        ScanMode::Sequential => (n, Box::new(0..n)),
         ScanMode::Range { start_byte, end_byte } => {
-            let bs = u64::from(map.block_size);
             let first = (*start_byte / bs).min(n);
             let last = end_byte.div_ceil(bs).min(n);
-            (first..last).collect()
+            (last.saturating_sub(first), Box::new(first..last))
         }
-        ScanMode::Butterfly => {
-            let mut order = Vec::with_capacity(n as usize);
-            let (mut lo, mut hi) = (0u64, n);
-            while lo < hi {
-                order.push(lo);
-                lo += 1;
-                if lo < hi {
-                    hi -= 1;
-                    order.push(hi);
-                }
-            }
-            order
-        }
+        ScanMode::Butterfly => (n, Box::new((0..n).map(move |i| if i % 2 == 0 { i / 2 } else { n - 1 - i / 2 }))),
         ScanMode::RandomSample { percent } => {
+            if n == 0 {
+                return (0, Box::new(std::iter::empty()));
+            }
             let p = percent.clamp(0.001, 100.0);
-            let k = (((n as f64) * p / 100.0).ceil() as u64).clamp(1, n);
-            let stride = n as f64 / k as f64;
-            let span = (stride.floor() as u64).max(1);
+            let k = ((n as f64 * p / 100.0).ceil() as u64).clamp(1, n);
             let mut rng = SplitMix64::new(seed);
-            let mut order: Vec<u64> =
-                (0..k).map(|i| ((i as f64 * stride) as u64 + rng.below(span)).min(n - 1)).collect();
-            order.dedup();
-            rng.shuffle(&mut order);
-            order
+            // Visit each stratum once in a reproducible, scattered order using bounded memory.
+            let start = rng.below(k);
+            let mut step = rng.below(k).max(1);
+            while gcd(step, k) != 1 {
+                step = if step == k { 1 } else { step + 1 };
+            }
+            let order = (0..k).map(move |i| {
+                let stratum = ((u128::from(i) * u128::from(step) + u128::from(start)) % u128::from(k)) as u64;
+                let boundary = |j: u64| (u128::from(j) * u128::from(n) / u128::from(k)) as u64;
+                let lo = boundary(stratum);
+                lo + rng.below(boundary(stratum + 1) - lo)
+            });
+            (k, Box::new(order))
         }
     }
+}
+
+fn gcd(mut a: u64, mut b: u64) -> u64 {
+    while b != 0 {
+        (a, b) = (b, a % b);
+    }
+    a
+}
+
+pub fn block_order(mode: &ScanMode, map: &BlockMap, seed: u64) -> Vec<u64> {
+    scan_order(mode, map.total_blocks(), u64::from(map.block_size), seed).1.collect()
 }
 
 /// Everything a read scan produced.
@@ -226,6 +242,19 @@ pub struct ScanOutcome {
     pub cancelled: bool,
     pub elapsed: Duration,
     pub bytes_read: u64,
+    pub error: Option<String>,
+    pub recovered_blocks: u64,
+    pub slow_offsets: Vec<u64>,
+    pub slow_blocks: u64,
+    pub zero_blocks: u64,
+    pub scanned_blocks: u64,
+    pub total_blocks: u64,
+    pub io_block_size: u32,
+    pub bucket_counts: [u64; BUCKET_COUNT],
+    pub latency: crate::stats::LatencyStats,
+    pub data_io_us: u64,
+    pub data_bytes: u64,
+    pub speed_curve_mb_s: Vec<f64>,
 }
 
 const MAX_BAD_SECTORS: usize = 100_000;
@@ -261,8 +290,24 @@ pub fn run_read_scan(
     let size = dev.size_bytes();
     let sector = u64::from(dev.logical_sector_size().max(512));
     let block_size = ((u64::from(cfg.block_size) / sector).max(1) * sector) as u32;
-    let mut map = BlockMap::new(size, block_size);
-    let order = block_order(&cfg.mode, &map, cfg.seed);
+    let total_blocks = size.div_ceil(u64::from(block_size));
+    let per_cell = if cfg.dense { 1 } else { total_blocks.div_ceil(65_536).max(1) };
+    let map_block = u32::try_from(u64::from(block_size) * per_cell).unwrap_or(u32::MAX);
+    let (planned, order) = scan_order(&cfg.mode, total_blocks, u64::from(block_size), cfg.seed);
+    let mut map = BlockMap::new(size, map_block);
+    let mut scanned_blocks = 0;
+    let mut recovered_blocks = 0;
+    let mut slow_blocks = 0;
+    let mut zero_blocks = 0;
+    let mut slow_offsets = Vec::new();
+    let mut bucket_counts = [0; BUCKET_COUNT];
+    let mut histogram = crate::stats::LatencyHistogram::default();
+    let mut data_io_us = 0u64;
+    let mut data_bytes = 0u64;
+    let mut error = None;
+    let mut segment_bytes = [0u64; 200];
+    let mut segment_us = [0u64; 200];
+    let segment_count = total_blocks.clamp(1, 200) as usize;
 
     let mut buf = AlignedBuf::new(block_size as usize);
     let mut sector_buf = AlignedBuf::new(sector as usize);
@@ -271,28 +316,44 @@ pub fn run_read_scan(
     let mut bytes_read = 0u64;
     let mut cancelled = false;
     let mut errors_logged = 0;
+    let mut consecutive_bad_blocks = 0;
 
     let mut batcher = Batcher::new(sink);
-    batcher.pass("Read scan", order.len() as u64, map.total_blocks(), block_size);
+    batcher.pass("Read scan", planned, total_blocks, block_size);
 
-    for &index in &order {
+    for index in order {
         if cancel.load(Ordering::Relaxed) {
             cancelled = true;
             break;
         }
-        let offset = map.offset(index);
-        let len = map.block_len(index) as usize;
+        let offset = index * u64::from(block_size);
+        let len = u64::from(block_size).min(size - offset) as usize;
         let (mut result, mut elapsed) = timed_read(dev, offset, &mut buf[..len]);
         let mut attempts = 0;
-        while result.is_err() && attempts < cfg.retries {
+        while result.as_ref().is_err_and(crate::platform::is_media_read_error) && attempts < cfg.retries {
+            if cancel.load(Ordering::Relaxed) {
+                cancelled = true;
+                break;
+            }
             attempts += 1;
             let (r, e) = timed_read(dev, offset, &mut buf[..len]);
             result = r;
             elapsed += e;
         }
+        if cancelled {
+            break;
+        }
+        if let Err(e) = &result
+            && !crate::platform::is_media_read_error(e)
+        {
+            error = Some(format!("Scan stopped at byte {offset}: {e}"));
+            unresolved_blocks.push(index);
+            break;
+        }
         let status = match result {
             Ok(()) => {
                 bytes_read += len as u64;
+                recovered_blocks += u64::from(attempts > 0);
                 if is_all_zero(&buf[..len]) { BlockStatus::OkZero } else { BlockStatus::Ok }
             }
             Err(err) => {
@@ -300,29 +361,95 @@ pub fn run_read_scan(
                     batcher.log(format!("Read error at byte {offset}: {err}"));
                     errors_logged += 1;
                 }
-                if cfg.pinpoint_errors && bad_sectors.len() < MAX_BAD_SECTORS {
-                    let complete = pinpoint(dev, offset, len as u64, sector, &mut sector_buf, &mut bad_sectors, cancel);
-                    if !complete {
-                        unresolved_blocks.push(index);
+                if cfg.pinpoint_errors {
+                    match pinpoint(dev, offset, len as u64, sector, &mut sector_buf, &mut bad_sectors, cancel) {
+                        Ok(true) => {}
+                        Ok(false) => unresolved_blocks.push(index),
+                        Err(e) => {
+                            unresolved_blocks.push(index);
+                            error = Some(format!("Pinpointing stopped in block at byte {offset}: {e}"));
+                        }
                     }
+                } else {
+                    unresolved_blocks.push(index);
                 }
                 BlockStatus::Error
             }
         };
+        if status == BlockStatus::Error {
+            consecutive_bad_blocks += 1;
+            if consecutive_bad_blocks >= 32 {
+                error.get_or_insert_with(|| "Scan stopped after 32 consecutive unreadable blocks.".into());
+            }
+        } else {
+            consecutive_bad_blocks = 0;
+        }
         let latency_us = duration_us(elapsed);
-        map.set(index, latency_us, status);
+        let cell = offset / u64::from(map_block);
+        let (old_latency, old_status) = map.get(cell);
+        if old_status != BlockStatus::Error
+            && (status == BlockStatus::Error || old_status == BlockStatus::NotScanned || latency_us >= old_latency)
+        {
+            map.set(cell, latency_us, status);
+        }
+        scanned_blocks += 1;
+        if let Some(bucket) = bucket_index(latency_us, status) {
+            bucket_counts[bucket] += 1;
+        }
+        if status.is_ok() {
+            histogram.add(latency_us);
+            if status == BlockStatus::OkZero {
+                zero_blocks += 1;
+            }
+            if latency_us >= SLOW_THRESHOLD_US {
+                slow_blocks += 1;
+                if slow_offsets.len() < MAX_BAD_SECTORS {
+                    slow_offsets.push(offset);
+                }
+            }
+            if !(cfg.exclude_zero_from_throughput && status == BlockStatus::OkZero) {
+                data_io_us += u64::from(latency_us);
+                data_bytes += len as u64;
+                let seg = (u128::from(index) * segment_count as u128 / u128::from(total_blocks)) as usize;
+                segment_bytes[seg] += len as u64;
+                segment_us[seg] += u64::from(latency_us);
+            }
+        }
         batcher.push(Some(BlockUpdate { index, latency_us, status }), len as u64);
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+        }
+        if cancelled || error.is_some() {
+            break;
+        }
     }
     batcher.flush();
 
     ScanOutcome {
-        completed: !cancelled,
+        completed: !cancelled && error.is_none() && planned > 0,
+        error,
+        recovered_blocks,
+        slow_offsets,
+        slow_blocks,
+        zero_blocks,
+        scanned_blocks,
+        total_blocks,
+        io_block_size: block_size,
+        bucket_counts,
+        latency: if cfg.dense { crate::stats::latency_stats(map.ok_latencies()) } else { histogram.finish() },
+        data_io_us,
+        data_bytes,
+        speed_curve_mb_s: segment_bytes[..segment_count]
+            .iter()
+            .zip(&segment_us)
+            .map(|(&bytes, &us)| if us == 0 { 0.0 } else { bytes as f64 / us as f64 })
+            .collect(),
         cancelled,
-        map,
         bad_sectors,
         unresolved_blocks,
         elapsed: start.elapsed(),
         bytes_read,
+        map,
     }
 }
 
@@ -335,26 +462,36 @@ fn pinpoint(
     sector_buf: &mut [u8],
     bad: &mut Vec<u64>,
     cancel: &AtomicBool,
-) -> bool {
+) -> std::io::Result<bool> {
     let mut consecutive = 0u32;
     let mut pos = offset;
     while pos < offset + len {
         if cancel.load(Ordering::Relaxed) || bad.len() >= MAX_BAD_SECTORS {
-            return false;
+            return Ok(false);
         }
-        let ok = dev.read_at(pos, sector_buf).is_ok() || dev.read_at(pos, sector_buf).is_ok();
+        let mut ok = false;
+        for _ in 0..2 {
+            match dev.read_at(pos, sector_buf) {
+                Ok(()) => {
+                    ok = true;
+                    break;
+                }
+                Err(e) if crate::platform::is_media_read_error(&e) => {}
+                Err(e) => return Err(e),
+            }
+        }
         if ok {
             consecutive = 0;
         } else {
             bad.push(pos / sector);
             consecutive += 1;
             if consecutive >= MAX_CONSECUTIVE_FAILURES {
-                return false;
+                return Ok(false);
             }
         }
         pos += sector;
     }
-    true
+    Ok(true)
 }
 
 #[cfg(test)]

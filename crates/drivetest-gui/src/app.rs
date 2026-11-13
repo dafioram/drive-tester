@@ -354,6 +354,7 @@ impl DriveTestApp {
                     view.phase = if report.test.cancelled { "Stopped".into() } else { "Finished".into() };
                     if let Some(s) = &report.scan {
                         view.exact = Some(s.latency.clone());
+                        view.reported_curve = Some(s.speed_curve_mb_s.clone());
                         self.last_bad.insert(disk, (report.drive.clone(), s.bad_sectors.clone()));
                     }
                     if let Some(st) = &report.stale {

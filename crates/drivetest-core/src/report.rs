@@ -122,8 +122,16 @@ pub struct ScanReport {
     pub latency: LatencyStats,
     pub bucket_counts: [u64; BUCKET_COUNT],
     pub slow_blocks: u64,
+    #[serde(default)]
+    pub slow_offsets: Vec<u64>,
+    #[serde(default)]
+    pub recovered_blocks: u64,
+    #[serde(default)]
+    pub scan_config: Option<crate::scan::ScanConfig>,
     /// Blocks that read as all zeros (on SSDs: trimmed / never written).
     pub zero_blocks: u64,
+    #[serde(default)]
+    pub data_bytes: Option<u64>,
     pub bad_sectors: Vec<u64>,
     pub bad_sector_files: Vec<SectorFile>,
     pub unresolved_blocks: Vec<u64>,

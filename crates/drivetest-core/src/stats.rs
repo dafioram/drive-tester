@@ -40,6 +40,65 @@ pub fn latency_stats(samples: impl IntoIterator<Item = u32>) -> LatencyStats {
     }
 }
 
+/// Fixed-size histogram. Values below 1024 µs are exact; the rest use
+/// 256 bins per power of two, with an exact observed minimum and maximum.
+pub(crate) struct LatencyHistogram {
+    counts: Vec<u64>,
+    stats: LatencyStats,
+    sum: u128,
+}
+
+impl Default for LatencyHistogram {
+    fn default() -> Self {
+        Self { counts: vec![0; 1024 + 22 * 256], stats: LatencyStats::default(), sum: 0 }
+    }
+}
+
+impl LatencyHistogram {
+    pub fn add(&mut self, us: u32) {
+        let index = if us < 1024 {
+            us as usize
+        } else {
+            let shift = us.ilog2() - 8;
+            1024 + (shift as usize - 2) * 256 + (us >> shift) as usize - 256
+        };
+        self.counts[index] += 1;
+        if self.stats.samples == 0 || us < self.stats.min_us {
+            self.stats.min_us = us;
+        }
+        self.stats.samples += 1;
+        self.stats.max_us = self.stats.max_us.max(us);
+        self.sum += u128::from(us);
+    }
+
+    pub fn finish(mut self) -> LatencyStats {
+        let n = self.stats.samples;
+        if n == 0 {
+            return self.stats;
+        }
+        let pick = |p: f64| {
+            let mut remaining = ((n - 1) as f64 * p).round() as u64;
+            for (i, &count) in self.counts.iter().enumerate() {
+                if remaining < count {
+                    let value = if i < 1024 {
+                        i as u32
+                    } else {
+                        let bin = i - 1024;
+                        ((256 + bin % 256) as u32) << (2 + bin / 256)
+                    };
+                    return value.max(self.stats.min_us);
+                }
+                remaining -= count;
+            }
+            self.stats.max_us
+        };
+        (self.stats.p50_us, self.stats.p90_us, self.stats.p99_us, self.stats.p999_us) =
+            (pick(0.50), pick(0.90), pick(0.99), pick(0.999));
+        self.stats.mean_us = self.sum as f64 / n as f64;
+        self.stats
+    }
+}
+
 /// Formats microseconds for display: `850 µs`, `12.4 ms`, `1.20 s`.
 pub fn format_latency(us: u32) -> String {
     match us {

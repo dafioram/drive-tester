@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 
-use crate::analysis::{slow_blocks, speed_curve, weak_regions, zero_blocks};
+use crate::analysis::{speed_curve, weak_regions};
 use crate::events::{EngineEvent, Progress};
 use crate::freespace::{FreeSpaceConfig, run_free_space};
 use crate::health::{HealthSnapshot, RecordingVerdict, VerdictLevel, assess_smr, health_changes};
@@ -291,7 +291,17 @@ pub fn run_job(
                 {
                     return Err(failed("The scan range contains no bytes on this drive."));
                 }
-                let outcome = run_read_scan(&mut *reader, cfg, cancel, &mut sink);
+                let mut cfg = cfg.clone();
+                cfg.exclude_zero_from_throughput = req.drive.media == MediaKind::Ssd;
+                let sector = reader.logical_sector_size().max(512);
+                let block = (cfg.block_size / sector).max(1) * sector;
+                if cfg.dense && reader.size_bytes().div_ceil(u64::from(block)) > 20_000_000 {
+                    return Err(failed(
+                        "Dense scan export would exceed 20 million blocks. Use the compact default or increase the block size.",
+                    ));
+                }
+                let outcome = run_read_scan(&mut *reader, &cfg, cancel, &mut sink);
+                report.test.error = outcome.error.clone();
                 let sector = reader.logical_sector_size();
                 drop(reader);
                 report.test.completed = outcome.completed;
@@ -299,7 +309,7 @@ pub fn run_job(
                 if !outcome.bad_sectors.is_empty() {
                     send(JobEvent::Phase("Mapping bad sectors to files".into()));
                 }
-                report.scan = Some(build_scan_report(platform, &req.drive, sector, cfg, outcome, &mut post_log));
+                report.scan = Some(build_scan_report(platform, &req.drive, sector, &cfg, outcome, &mut post_log));
             }
             JobKind::FreeSpaceVerify { mount, config } => {
                 let auth = policy.authorize_free_space(platform, &req.drive, mount).map_err(refused)?;
@@ -470,7 +480,7 @@ fn build_scan_report(
     log: &mut Vec<String>,
 ) -> ScanReport {
     let positional = cfg.mode.is_positional();
-    let curve = if positional { speed_curve(&outcome.map, 200) } else { Vec::new() };
+    let curve = if positional { outcome.speed_curve_mb_s.clone() } else { Vec::new() };
     let weak = if positional { weak_regions(&outcome.map, &curve) } else { Vec::new() };
     let bad_sector_files = if outcome.bad_sectors.is_empty() {
         Vec::new()
@@ -491,20 +501,23 @@ fn build_scan_report(
         }
     };
     let secs = outcome.elapsed.as_secs_f64();
-    // Throughput from the drive's own time per block (excludes app overhead).
-    let io_secs: f64 = outcome.map.ok_latencies().map(|l| f64::from(l) / 1e6).sum();
+
     ScanReport {
         mode: cfg.mode.clone(),
-        block_size: outcome.map.block_size,
-        total_blocks: outcome.map.total_blocks(),
-        scanned_blocks: outcome.map.scanned_blocks(),
+        block_size: outcome.io_block_size,
+        total_blocks: outcome.total_blocks,
+        scanned_blocks: outcome.scanned_blocks,
         bytes_read: outcome.bytes_read,
         elapsed_s: secs,
-        average_mb_s: if io_secs > 0.0 { outcome.bytes_read as f64 / 1e6 / io_secs } else { 0.0 },
-        latency: latency_stats(outcome.map.ok_latencies()),
-        bucket_counts: outcome.map.bucket_counts(),
-        slow_blocks: slow_blocks(&outcome.map),
-        zero_blocks: zero_blocks(&outcome.map),
+        average_mb_s: if outcome.data_io_us > 0 { outcome.data_bytes as f64 / outcome.data_io_us as f64 } else { 0.0 },
+        latency: outcome.latency,
+        bucket_counts: outcome.bucket_counts,
+        slow_blocks: outcome.slow_blocks,
+        slow_offsets: outcome.slow_offsets,
+        recovered_blocks: outcome.recovered_blocks,
+        scan_config: Some(cfg.clone()),
+        zero_blocks: outcome.zero_blocks,
+        data_bytes: Some(outcome.data_bytes),
         bad_sectors: outcome.bad_sectors,
         bad_sector_files,
         unresolved_blocks: outcome.unresolved_blocks,
@@ -662,6 +675,19 @@ pub fn findings(r: &Report) -> Vec<String> {
         f.push(c.summary.clone());
     }
     if let Some(s) = &r.scan {
+        f.push(format!(
+            "{}: {} of {} blocks checked ({} read).",
+            s.mode.label(),
+            s.scanned_blocks,
+            s.total_blocks,
+            format_bytes(s.bytes_read)
+        ));
+        if s.recovered_blocks > 0 {
+            f.push(format!("{} blocks read successfully after a retry.", s.recovered_blocks));
+        }
+        if !s.unresolved_blocks.is_empty() {
+            f.push(format!("{} blocks could not be fully diagnosed.", s.unresolved_blocks.len()));
+        }
         if !s.bad_sectors.is_empty() {
             f.push(format!("{} unreadable sectors found.", s.bad_sectors.len()));
         } else if s.bucket_counts[BUCKET_COUNT - 1] > 0 {
@@ -678,7 +704,7 @@ pub fn findings(r: &Report) -> Vec<String> {
         }
         if r.drive.media == MediaKind::Ssd && s.zero_blocks > 0 && s.scanned_blocks > 0 {
             f.push(format!(
-                "{:.0}% of blocks read as zeros (trimmed or never written); their speed is not meaningful.",
+                "{:.0}% of checked blocks returned zeros. They are excluded from the SSD throughput summary.",
                 100.0 * s.zero_blocks as f64 / s.scanned_blocks as f64
             ));
         }

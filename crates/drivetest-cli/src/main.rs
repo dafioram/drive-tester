@@ -90,6 +90,9 @@ enum Command {
         /// Do not narrow failing blocks down to single sectors.
         #[arg(long)]
         no_pinpoint: bool,
+        /// Export per-block data (up to 20 million blocks).
+        #[arg(long)]
+        dense: bool,
         #[command(flatten)]
         report: ReportArgs,
     },
@@ -307,7 +310,7 @@ fn main() -> ExitCode {
             let kind = if extended { SelfTestKind::Extended } else { SelfTestKind::Short };
             job(platform, disk, JobKind::SelfTest(kind), Mode::ReadOnly, None, &report)
         }
-        Command::Scan { disk, mode, percent, start_gb, end_gb, block_kib, retries, no_pinpoint, report } => {
+        Command::Scan { disk, mode, percent, start_gb, end_gb, block_kib, retries, no_pinpoint, dense, report } => {
             let mode = match mode {
                 ScanModeArg::Sequential => ScanMode::Sequential,
                 ScanModeArg::Random => ScanMode::RandomSample { percent },
@@ -322,6 +325,7 @@ fn main() -> ExitCode {
                 block_size: block_kib.clamp(4, 65_536) * 1024,
                 retries,
                 pinpoint_errors: !no_pinpoint,
+                dense,
                 ..Default::default()
             };
             job(platform, disk, JobKind::ReadScan(cfg), Mode::ReadOnly, None, &report)
