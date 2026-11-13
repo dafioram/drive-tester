@@ -319,7 +319,7 @@ impl Policy {
                 SystemRole::Data => Ok(false),
                 SystemRole::System { .. } if system_opt_in && targeted => Ok(true),
                 SystemRole::System { reasons } => Err(PolicyError::SystemRefreshRestricted(reasons.join("; "))),
-                SystemRole::Undetermined { reason } => Err(PolicyError::SystemRefreshRestricted(reason.clone())),
+                SystemRole::Undetermined { reason } => Err(PolicyError::Undetermined(reason.clone())),
             }
         };
         check_role(drive)?;

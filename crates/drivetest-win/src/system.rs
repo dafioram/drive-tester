@@ -18,6 +18,7 @@ use crate::volumes::{DiskExtent, VolumeRecord, extents_of};
 pub struct SystemDisks {
     reasons: BTreeMap<u32, Vec<String>>,
     undetermined: Option<String>,
+    uncertain_disks: BTreeMap<u32, String>,
 }
 
 impl SystemDisks {
@@ -38,10 +39,16 @@ impl SystemDisks {
         self.undetermined.get_or_insert(reason.into());
     }
 
+    fn mark_uncertain(&mut self, extents: &[DiskExtent], reason: &str) {
+        for extent in extents {
+            self.uncertain_disks.entry(extent.disk).or_insert_with(|| reason.into());
+        }
+    }
+
     pub fn role(&self, disk: u32) -> SystemRole {
         if let Some(reasons) = self.reasons.get(&disk) {
             SystemRole::System { reasons: reasons.clone() }
-        } else if let Some(reason) = &self.undetermined {
+        } else if let Some(reason) = self.uncertain_disks.get(&disk).or(self.undetermined.as_ref()) {
             SystemRole::Undetermined { reason: reason.clone() }
         } else {
             SystemRole::Data
@@ -191,26 +198,45 @@ pub fn detect(volumes: Option<&[VolumeRecord]>, buses: &HashMap<u32, BusType>) -
         if !v.mount_points_known {
             let reason = format!("could not read mount points for {}", v.guid_path);
             if v.extents_known {
-                s.add_all(&v.extents, &reason);
+                s.mark_uncertain(&v.extents, &reason);
             } else {
                 s.fail(reason);
             }
         }
         for mount in &v.mount_points {
             for file in ["pagefile.sys", "hiberfil.sys", "swapfile.sys"] {
-                let reason = match presence(&format!("{mount}{file}")) {
+                let (reason, known) = match presence(&format!("{mount}{file}")) {
                     Presence::Absent => continue,
-                    Presence::Present => format!("holds {file} ({mount})"),
-                    Presence::Unknown(code) => format!("could not check {mount} for {file} (error {code})"),
+                    Presence::Present => (format!("holds {file} ({mount})"), true),
+                    Presence::Unknown(code) => (format!("could not check {mount} for {file} (error {code})"), false),
                 };
-                if v.extents_known {
-                    // Mark this volume's disks only; unknown results fail closed per disk.
+                if !v.extents_known {
+                    s.fail(format!("{reason}, and its disk could not be identified"));
+                } else if known {
                     s.add_all(&v.extents, &reason);
                 } else {
-                    s.fail(format!("{reason}, and its disk could not be identified"));
+                    s.mark_uncertain(&v.extents, &reason);
                 }
             }
         }
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uncertain_locations_do_not_turn_into_known_system_disks() {
+        let mut roles = SystemDisks::default();
+        let extents = [DiskExtent { disk: 1, offset: 0, length: 4096 }];
+        roles.mark_uncertain(&extents, "page-file location unresolved");
+        assert!(matches!(roles.role(1), SystemRole::Undetermined { .. }));
+        assert_eq!(roles.role(2), SystemRole::Data);
+        roles.fail("boot volume unresolved");
+        assert!(matches!(roles.role(2), SystemRole::Undetermined { .. }));
+        roles.add_all(&extents, "contains the Windows folder");
+        assert!(matches!(roles.role(1), SystemRole::System { .. }));
+    }
 }
