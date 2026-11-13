@@ -116,6 +116,20 @@ drivers refuse the command. In each case the app reports what it could not read.
 - Administrator rights for real drives. The GUI asks for them through its manifest; run the CLI
   from an Administrator terminal.
 
+## Downloads and releases
+
+The [Releases page](https://github.com/dafioram/drive-tester/releases) has portable
+x86-64 archives containing both the GUI and CLI. Windows supports physical drives.
+The Linux build is demo-only and targets Ubuntu 22.04 or newer and compatible
+distributions. The Linux GUI requires a graphical session.
+
+To publish binaries, create a GitHub release with a new tag pointing at a commit
+that contains `.github/workflows/release.yml`. Publishing the release starts both
+builds. After they pass, the workflow attaches both archives and `SHA256SUMS.txt`.
+To build binaries for an existing release, run **Release binaries** from the
+Actions tab and enter that release's tag. For an immutable release, attach the
+assets to a draft with an existing Git tag via the manual workflow before publishing.
+
 ## Build and run
 
 ```powershell

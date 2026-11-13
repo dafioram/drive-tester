@@ -1,0 +1,119 @@
+name: Release binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag of the GitHub release to build
+        required: true
+        type: string
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-binaries-${{ inputs.tag || github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            platform: windows-x86_64
+            archive: drivetest-windows-x86_64.zip
+          - runner: ubuntu-22.04
+            platform: linux-x86_64
+            archive: drivetest-linux-x86_64.tar.gz
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          persist-credentials: false
+
+      - name: Install Rust
+        run: rustup toolchain install 1.95.0 --profile minimal
+
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwayland-dev libxkbcommon-dev libx11-dev libudev-dev libfontconfig1-dev
+
+      - name: Build release binaries
+        run: cargo +1.95.0 build --release --locked -p drivetest-cli -p drivetest-gui
+
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          New-Item -ItemType Directory -Path package, dist | Out-Null
+          Copy-Item -Path target/release/drivetest.exe, target/release/drivetest-gui.exe, README.md -Destination package
+          & ./package/drivetest.exe --demo list
+          if ($LASTEXITCODE -ne 0) { throw 'Drive Test CLI smoke test failed' }
+          Compress-Archive -Path package/* -DestinationPath "dist/$env:ARCHIVE"
+
+      - name: Package Linux
+        if: runner.os == 'Linux'
+        env:
+          ARCHIVE: ${{ matrix.archive }}
+        run: |
+          mkdir -p package dist
+          install -m 755 target/release/drivetest target/release/drivetest-gui package/
+          install -m 644 README.md package/
+          ./package/drivetest --demo list
+          tar -czf "dist/$ARCHIVE" -C package drivetest drivetest-gui README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
+  attach:
+    name: Attach both archives to the release
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: '*-x86_64'
+          merge-multiple: true
+          path: dist
+
+      - name: Upload missing release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          archives=(drivetest-windows-x86_64.zip drivetest-linux-x86_64.tar.gz)
+          existing=$(gh release view --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' -- "$TAG")
+          for asset in "${archives[@]}"; do
+            if grep -Fxq -- "$asset" <<< "$existing"; then
+              gh release download --repo "$GITHUB_REPOSITORY" --pattern "$asset" --clobber -- "$TAG"
+            else
+              gh release upload --repo "$GITHUB_REPOSITORY" -- "$TAG" "$asset"
+            fi
+          done
+          sha256sum "${archives[@]}" > SHA256SUMS.txt
+          if grep -Fxq -- SHA256SUMS.txt <<< "$existing"; then
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern SHA256SUMS.txt --output published-checksums.txt -- "$TAG"
+            sha256sum -c published-checksums.txt
+          else
+            gh release upload --repo "$GITHUB_REPOSITORY" -- "$TAG" SHA256SUMS.txt
+          fi
