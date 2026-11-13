@@ -327,3 +327,24 @@ pub fn volume_of_path(path: &str) -> io::Result<String> {
     }
     Ok(from_wide(&name))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extent_parser_rejects_partial_and_invalid_records() {
+        let mut reply = vec![0; EXTENTS_AT + 2 * EXTENT_SIZE];
+        reply[..4].copy_from_slice(&2u32.to_le_bytes());
+        for disk in 0..2 {
+            let base = EXTENTS_AT + disk * EXTENT_SIZE;
+            reply[base..base + 4].copy_from_slice(&(disk as u32).to_le_bytes());
+            let offset = base + EXTENT_LENGTH_AT;
+            reply[offset..offset + 8].copy_from_slice(&4096i64.to_le_bytes());
+        }
+        assert_eq!(parse_extents(&reply).unwrap().iter().map(|e| e.disk).collect::<Vec<_>>(), [0, 1]);
+        assert!(parse_extents(&reply[..reply.len() - 1]).is_err());
+        reply[EXTENTS_AT + EXTENT_LENGTH_AT..EXTENTS_AT + EXTENT_LENGTH_AT + 8].fill(0);
+        assert!(parse_extents(&reply).is_err());
+    }
+}
