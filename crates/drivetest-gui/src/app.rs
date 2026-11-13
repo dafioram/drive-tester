@@ -154,6 +154,7 @@ pub struct DriveTestApp {
     /// Bad sectors from the latest read scan per drive (feeds remap).
     last_bad: HashMap<u32, (DriveInfo, Vec<u64>)>,
     report_dir: PathBuf,
+    recheck_path: String,
 }
 
 impl DriveTestApp {
@@ -202,6 +203,7 @@ impl DriveTestApp {
             stale: HashMap::new(),
             last_bad: HashMap::new(),
             report_dir: default_report_dir(),
+            recheck_path: String::new(),
         };
         app.refresh();
         let numbers: Vec<u32> = app.drives.iter().map(|d| d.number).collect();
@@ -925,6 +927,42 @@ impl DriveTestApp {
             }
         });
         ui.add_space(8.0);
+        ui.add_enabled_ui(!busy, |ui| {
+            let last_scan = self.reports.get(&d.number).filter(|last| {
+                last.report.scan.as_ref().is_some_and(|s| {
+                    !s.bad_sectors.is_empty() || !s.slow_offsets.is_empty() || !s.unresolved_blocks.is_empty()
+                })
+            });
+            if ui.add_enabled(last_scan.is_some(), egui::Button::new("Recheck last scan")).clicked()
+                && let Some(last) = last_scan
+            {
+                match drivetest_core::recheck::RecheckPlan::from_report(&last.report, self.platform.name()) {
+                    Ok(plan) => self.start(d, JobKind::Recheck(plan), None),
+                    Err(error) => {
+                        self.errors.insert(d.number, error);
+                    }
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.recheck_path).on_hover_text("Path to a saved JSON scan report");
+                if ui.button("Recheck saved report").clicked() {
+                    let plan = Report::load(std::path::Path::new(self.recheck_path.trim()))
+                        .map_err(|error| error.to_string())
+                        .and_then(|report| {
+                            drivetest_core::recheck::RecheckPlan::from_report(&report, self.platform.name())
+                        });
+                    match plan {
+                        Ok(plan) => self.start(d, JobKind::Recheck(plan), None),
+                        Err(error) => {
+                            self.errors.insert(d.number, error);
+                        }
+                    }
+                }
+            });
+            if let Some(error) = self.errors.get(&d.number) {
+                ui.colored_label(RED, error);
+            }
+        });
         self.live_view(ui, d);
     }
 

@@ -92,7 +92,7 @@ type it creates cannot be constructed anywhere else.
 ![Stale-data check and targeted refresh on the demo system disk](docs/screenshot-maintenance.png)
 
 **Everything else**
-- JSON report after every run, holding the raw per-block data.
+- JSON reports include a compact surface map and exact problem locations. Use `scan --dense` for per-block export.
 - Keeps the PC awake during tests; temperature sampled every 30 s.
 - `--demo` mode with four simulated drives, so every feature can be tried without hardware.
 
@@ -141,6 +141,7 @@ drivetest self-test 2 [--extended]               Drive's built-in self-test
 drivetest scan 2                                 Full sequential read scan
 drivetest scan 2 --mode random --percent 2       Quick random sample
 drivetest scan 2 --mode range --start-gb 100 --end-gb 200
+drivetest recheck 2 --from-report scan.json       Read-only recheck of saved problem locations
 drivetest verify-free-space 2 --volume E:\ --read-write [--max-gb 50]
 drivetest write-test 2 --kind probe --read-write            Prompts for the serial
 drivetest write-test 2 --kind full  --read-write --confirm-serial ABC123

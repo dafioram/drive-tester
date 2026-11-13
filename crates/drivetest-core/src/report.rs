@@ -54,6 +54,8 @@ pub struct Report {
     pub health: HealthSection,
     pub smr: Option<SmrAssessment>,
     pub scan: Option<ScanReport>,
+    #[serde(default)]
+    pub recheck: Option<crate::recheck::RecheckOutcome>,
     pub write_test: Option<WriteTestReport>,
     pub free_space: Option<FreeSpaceOutcome>,
     #[serde(default)]
@@ -186,6 +188,7 @@ impl Report {
             health: HealthSection::default(),
             smr: None,
             scan: None,
+            recheck: None,
             write_test: None,
             free_space: None,
             stale: None,
@@ -232,6 +235,9 @@ impl Report {
             .and_then(|w| w.repair.as_ref())
             .is_some_and(|r| !r.still_bad_sectors.is_empty() || r.verify_failures > 0 || r.unreadable_blocks > 0);
         health_bad
+            || self.recheck.as_ref().is_some_and(|result| {
+                result.reads.iter().any(|read| read.state != crate::recheck::RecheckState::Readable)
+            })
             || scan_bad
             || write_bad
             || free_bad

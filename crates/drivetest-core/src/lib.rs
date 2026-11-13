@@ -26,6 +26,7 @@ pub mod health;
 pub mod model;
 pub mod platform;
 pub mod policy;
+pub mod recheck;
 pub mod refresh;
 pub mod repair;
 pub mod report;

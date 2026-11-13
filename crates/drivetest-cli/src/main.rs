@@ -111,6 +111,14 @@ enum Command {
         #[command(flatten)]
         report: ReportArgs,
     },
+    /// Re-read problem locations from a saved scan report without writing.
+    Recheck {
+        disk: u32,
+        #[arg(long)]
+        from_report: PathBuf,
+        #[command(flatten)]
+        report: ReportArgs,
+    },
     /// DESTRUCTIVE: write test patterns to the raw drive. Erases everything on it.
     WriteTest {
         disk: u32,
@@ -329,6 +337,16 @@ fn main() -> ExitCode {
                 ..Default::default()
             };
             job(platform, disk, JobKind::ReadScan(cfg), Mode::ReadOnly, None, &report)
+        }
+        Command::Recheck { disk, from_report, report } => {
+            let plan = match load_report_for(&*platform, disk, &from_report, None)
+                .and_then(|source| drivetest_core::recheck::RecheckPlan::from_report(&source, platform.name()))
+            {
+                Ok(plan) => plan,
+                Err(error) => return exit_error(error),
+            };
+            let expected = DriveInfo { number: disk, ..plan.drive.clone() };
+            job_for_selection(platform, disk, Some(expected), JobKind::Recheck(plan), Mode::ReadOnly, None, &report)
         }
         Command::VerifyFreeSpace { disk, volume, read_write, max_gb, report } => {
             let config = FreeSpaceConfig { max_bytes: max_gb.map(|g| (g * 1e9) as u64), ..Default::default() };

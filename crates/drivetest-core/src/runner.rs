@@ -36,6 +36,7 @@ pub enum JobKind {
     HealthCheck,
     SelfTest(SelfTestKind),
     ReadScan(ScanConfig),
+    Recheck(crate::recheck::RecheckPlan),
     FreeSpaceVerify {
         mount: String,
         config: FreeSpaceConfig,
@@ -62,9 +63,11 @@ pub enum JobKind {
 impl JobKind {
     pub fn tier(&self) -> Tier {
         match self {
-            JobKind::HealthCheck | JobKind::SelfTest(_) | JobKind::ReadScan(_) | JobKind::StaleCheck { .. } => {
-                Tier::ReadOnly
-            }
+            JobKind::HealthCheck
+            | JobKind::SelfTest(_)
+            | JobKind::ReadScan(_)
+            | JobKind::Recheck(_)
+            | JobKind::StaleCheck { .. } => Tier::ReadOnly,
             JobKind::FreeSpaceVerify { .. } | JobKind::FileRefresh { .. } | JobKind::SpeedClass { .. } => {
                 Tier::NonDestructive
             }
@@ -77,6 +80,7 @@ impl JobKind {
             JobKind::HealthCheck => "Health check".into(),
             JobKind::SelfTest(k) => format!("Self-test ({})", k.label()),
             JobKind::ReadScan(_) => "Read scan".into(),
+            JobKind::Recheck(_) => "Read-only recheck".into(),
             JobKind::FreeSpaceVerify { .. } => "Free-space verify".into(),
             JobKind::WriteTest(cfg) => cfg.kind.label().into(),
             JobKind::StaleCheck { .. } => "Stale-data check".into(),
@@ -310,6 +314,21 @@ pub fn run_job(
                     send(JobEvent::Phase("Mapping bad sectors to files".into()));
                 }
                 report.scan = Some(build_scan_report(platform, &req.drive, sector, &cfg, outcome, &mut post_log));
+            }
+            JobKind::Recheck(plan) => {
+                let drives = platform.enumerate().map_err(|error| failed(error.to_string()))?;
+                let mut matching = drives.iter().filter(|drive| drive.matches_report_device(&plan.drive));
+                if matching.next().is_none_or(|drive| drive.number != disk || !drive.same_device(&req.drive))
+                    || matching.next().is_some()
+                {
+                    return Err(failed("The report's device identity is missing, ambiguous, or changed."));
+                }
+                let mut reader = policy.open_read(platform, &req.drive).map_err(refused)?;
+                let outcome = crate::recheck::run(&mut *reader, plan, cancel, &mut sink);
+                report.test.completed = !outcome.cancelled && outcome.error.is_none();
+                report.test.cancelled = outcome.cancelled;
+                report.test.error = outcome.error.clone();
+                report.recheck = Some(outcome);
             }
             JobKind::FreeSpaceVerify { mount, config } => {
                 let auth = policy.authorize_free_space(platform, &req.drive, mount).map_err(refused)?;
@@ -673,6 +692,19 @@ pub fn findings(r: &Report) -> Vec<String> {
         && let Some(c) = &fs.capacity
     {
         f.push(c.summary.clone());
+    }
+    if let Some(result) = &r.recheck {
+        use crate::recheck::RecheckState;
+        let count = |state| result.reads.iter().filter(|read| read.state == state).count();
+        f.push(format!(
+            "Rechecked {} of {} locations: {} readable at normal speed, {} still slow, {} unreadable, {} I/O errors.",
+            result.reads.len(),
+            result.planned,
+            count(RecheckState::Readable),
+            count(RecheckState::StillSlow),
+            count(RecheckState::Unreadable),
+            count(RecheckState::IoError)
+        ));
     }
     if let Some(s) = &r.scan {
         f.push(format!(
