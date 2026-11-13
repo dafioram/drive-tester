@@ -225,3 +225,28 @@ fn ata_endurance_requires_valid_normalized_device_statistics() {
     assert_eq!(parse_ata_endurance_page(&page), Some(23));
     assert_eq!(parse_ata_endurance_page(&page[..8]), None);
 }
+
+#[test]
+fn invalid_remap_list_does_not_turn_into_a_full_scan() {
+    let mut disk = FaultDisk::new(512);
+    let cfg = WriteTestConfig::new(WriteTestKind::Remap { lbas: vec![u64::MAX], refresh_slower_than_us: None });
+    let out = run_write_test(&mut disk, &cfg, &AtomicBool::new(false), &mut |_| {});
+    assert!(!out.completed);
+    assert!(out.repair.unwrap().aborted.is_some());
+    assert_eq!((disk.reads, disk.writes), (0, 0));
+}
+
+#[test]
+fn saved_reports_are_complete_and_do_not_replace_existing_files() {
+    use drivetest_core::demo::sample_drive;
+    use drivetest_core::policy::{Mode, Tier};
+    use drivetest_core::report::Report;
+    let dir = std::env::temp_dir().join(format!("drivetest-report-{}", drivetest_core::signature::fresh_seed()));
+    let report = Report::new("Demo", &sample_drive(), "read scan", Tier::ReadOnly, Mode::ReadOnly);
+    let path = dir.join(report.default_file_name());
+    report.save(&path).unwrap();
+    assert_eq!(Report::load(&path).unwrap(), report);
+    assert_eq!(report.save(&path).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    std::fs::remove_dir_all(dir).unwrap();
+}

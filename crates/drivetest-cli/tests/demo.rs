@@ -35,3 +35,24 @@ fn health_formats_have_the_same_exit_status_and_json_includes_the_custom_score()
     let snapshot: Value = serde_json::from_slice(&flash.stdout).unwrap();
     assert!(snapshot.get("health_score").unwrap().is_null());
 }
+
+#[test]
+fn saved_scan_recheck_rereads_problem_addresses_and_refuses_a_different_disk() {
+    let directory = std::env::temp_dir().join(format!(
+        "drivetest-cli-recheck-{}-{}",
+        std::process::id(),
+        drivetest_core::signature::fresh_seed()
+    ));
+    std::fs::create_dir(&directory).unwrap();
+    let source = demo(&["scan", "1", "--no-pinpoint", "--report-dir", directory.to_str().unwrap()]);
+    assert_eq!(source.status.code(), Some(1));
+    let path = std::fs::read_dir(&directory).unwrap().next().unwrap().unwrap().path();
+    let wrong = demo(&["recheck", "3", "--from-report", path.to_str().unwrap(), "--no-report"]);
+    assert_eq!(wrong.status.code(), Some(2));
+    let right = demo(&["recheck", "1", "--from-report", path.to_str().unwrap(), "--json", "--no-report"]);
+    std::fs::remove_dir_all(directory).unwrap();
+    assert_eq!(right.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&right.stdout).unwrap();
+    assert_eq!(report["test"]["tier"], "read_only");
+    assert!(report["recheck"]["reads"].as_array().unwrap().iter().any(|read| read["state"] == "unreadable"));
+}
