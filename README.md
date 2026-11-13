@@ -158,7 +158,7 @@ Add `--demo` to any command to use the simulated drives. Reports are saved to
 `Documents\DriveTest\reports` (override with `--report-dir`, skip with `--no-report`,
 print with `--json`). Ctrl+C stops a test cleanly and still writes a partial report.
 
-Exit codes: `0` passed, `1` problems found, `2` error, `3` refused by the safety policy.
+Exit codes: `0` passed, `1` problems found, `2` incomplete, unsupported or error, `3` refused by the safety policy.
 
 ## Reports
 

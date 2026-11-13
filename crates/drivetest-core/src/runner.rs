@@ -267,11 +267,17 @@ pub fn run_job(
 
         match &req.kind {
             JobKind::HealthCheck => {
-                report.test.completed = true;
+                report.test.completed = before.is_available() || before.sd.is_some();
             }
             JobKind::SelfTest(kind) => {
                 send(JobEvent::Phase(format!("Running {} self-test", kind.label())));
-                let st = run_self_test(platform, disk, *kind, cancel, &mut sink);
+                let (st, start_error) = run_self_test(platform, disk, *kind, before.self_test(), cancel, &mut sink);
+                if let Some(error) = start_error {
+                    report.test.unsupported = matches!(error, crate::platform::PlatformError::Unsupported(_));
+                    if !report.test.unsupported {
+                        report.test.error = Some(error.to_string());
+                    }
+                }
                 report.test.completed = st.final_status.is_some();
                 report.test.cancelled = cancel.load(Ordering::Relaxed);
                 report.self_test = Some(st);
@@ -279,6 +285,12 @@ pub fn run_job(
             JobKind::ReadScan(cfg) => {
                 send(JobEvent::Phase("Scanning".into()));
                 let mut reader = policy.open_read(platform, &req.drive).map_err(refused)?;
+                if reader.size_bytes() == 0
+                    || matches!(cfg.mode, crate::scan::ScanMode::Range { start_byte, end_byte }
+                        if start_byte >= end_byte || start_byte >= reader.size_bytes())
+                {
+                    return Err(failed("The scan range contains no bytes on this drive."));
+                }
                 let outcome = run_read_scan(&mut *reader, cfg, cancel, &mut sink);
                 drop(reader);
                 report.test.completed = outcome.completed;
@@ -354,6 +366,7 @@ pub fn run_job(
     report.temperatures = temps;
     report.log = log;
     report.test.finished_at = Some(Utc::now());
+    report.test.status = Some(report.status());
     report.findings = findings(&report);
     Ok(report)
 }
@@ -362,13 +375,22 @@ fn run_self_test(
     platform: &dyn Platform,
     disk: u32,
     kind: SelfTestKind,
+    previous: Option<&crate::health::SelfTestStatus>,
     cancel: &AtomicBool,
     sink: &mut dyn FnMut(EngineEvent),
-) -> SelfTestReport {
-    let mut rep = SelfTestReport { kind: kind.label().into(), started: false, final_status: None, note: None };
+) -> (SelfTestReport, Option<crate::platform::PlatformError>) {
+    let mut rep =
+        SelfTestReport { kind: kind.label().into(), started: false, final_status: None, note: None, failed: false };
+    if cancel.load(Ordering::Relaxed) {
+        return (rep, None);
+    }
+    if previous.is_some_and(|status| status.in_progress) {
+        rep.note = Some("The drive already has a self-test in progress.".into());
+        return (rep, None);
+    }
     if let Err(e) = platform.start_self_test(disk, kind) {
         rep.note = Some(e.to_string());
-        return rep;
+        return (rep, Some(e));
     }
     rep.started = true;
     sink(EngineEvent::Pass { name: format!("{} self-test", kind.label()), total_blocks: 0, block_size: 0 });
@@ -378,22 +400,24 @@ fn run_self_test(
         SelfTestKind::Extended => Duration::from_secs(48 * 3600),
     };
     let start = Instant::now();
+    let mut saw_progress = false;
     loop {
         // Poll every 5 s, checking for cancel every 100 ms.
         for _ in 0..50 {
             if cancel.load(Ordering::Relaxed) {
                 rep.note = Some("Stopped watching. The drive keeps running its self-test in the background.".into());
-                return rep;
+                return (rep, None);
             }
             thread::sleep(Duration::from_millis(100));
         }
         if start.elapsed() > limit {
             rep.note = Some("Gave up waiting for the self-test to finish.".into());
-            return rep;
+            return (rep, None);
         }
         let Ok(h) = platform.read_health(disk) else { continue };
         match h.self_test() {
             Some(st) if st.in_progress => {
+                saw_progress = true;
                 let remaining = u64::from(st.percent_remaining.unwrap_or(100));
                 sink(EngineEvent::Progress(Progress {
                     done: 100 - remaining.min(100),
@@ -403,7 +427,10 @@ fn run_self_test(
                     recent_mb_s: 0.0,
                 }));
             }
-            Some(st) => {
+            Some(st)
+                if (saw_progress || previous.is_some_and(|old| !old.in_progress && old != st))
+                    && (st.code == 0 || st.failed) =>
+            {
                 sink(EngineEvent::Progress(Progress {
                     done: 100,
                     total: 100,
@@ -412,11 +439,17 @@ fn run_self_test(
                     recent_mb_s: 0.0,
                 }));
                 rep.final_status = Some(st.description.clone());
-                return rep;
+                rep.failed = st.failed;
+                return (rep, None);
+            }
+            Some(_) if !saw_progress && start.elapsed() < Duration::from_secs(30) => {}
+            Some(st) => {
+                rep.note = Some(format!("Could not confirm a completed result for this run: {}", st.description));
+                return (rep, None);
             }
             None => {
                 rep.note = Some("The drive does not report self-test progress.".into());
-                return rep;
+                return (rep, None);
             }
         }
     }
@@ -744,11 +777,11 @@ mod tests {
     }
 
     #[test]
-    fn health_check_completes_on_every_drive() {
+    fn health_check_with_no_telemetry_is_incomplete() {
         let p = DemoPlatform::new_fast();
         for d in p.enumerate().unwrap() {
             let r = run(&p, &d, JobKind::HealthCheck, Mode::ReadOnly, None).unwrap();
-            assert!(r.test.completed);
+            assert_eq!(r.test.completed, d.bus != BusType::Usb);
             assert!(r.health.verdict.is_some());
         }
     }

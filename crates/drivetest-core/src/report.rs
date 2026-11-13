@@ -22,6 +22,28 @@ use crate::writetest::{CapacityVerdict, SmrProbeResult, WriteTestKind};
 /// Bump when the report layout changes incompatibly.
 pub const REPORT_SCHEMA: u32 = 1;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JobStatus {
+    Passed,
+    Problems,
+    Incomplete,
+    Unsupported,
+    Error,
+}
+
+impl JobStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "Passed",
+            Self::Problems => "Problems found",
+            Self::Incomplete => "Incomplete",
+            Self::Unsupported => "Unsupported",
+            Self::Error => "Error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Report {
     pub schema: u32,
@@ -54,9 +76,13 @@ pub struct TestInfo {
     pub mode: Mode,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub status: Option<JobStatus>,
     pub completed: bool,
     pub cancelled: bool,
     pub error: Option<String>,
+    #[serde(default)]
+    pub unsupported: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -80,6 +106,8 @@ pub struct SelfTestReport {
     pub started: bool,
     pub final_status: Option<String>,
     pub note: Option<String>,
+    #[serde(default)]
+    pub failed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -139,9 +167,11 @@ impl Report {
                 mode,
                 started_at: Utc::now(),
                 finished_at: None,
+                status: None,
                 completed: false,
                 cancelled: false,
                 error: None,
+                unsupported: false,
             },
             health: HealthSection::default(),
             smr: None,
@@ -158,7 +188,22 @@ impl Report {
         }
     }
 
-    /// True when anything worth attention was found (used for CLI exit codes).
+    /// Use the same outcome for human-readable and machine-readable output.
+    pub fn status(&self) -> JobStatus {
+        if self.test.unsupported {
+            JobStatus::Unsupported
+        } else if self.test.error.is_some() {
+            JobStatus::Error
+        } else if self.test.cancelled || !self.test.completed {
+            JobStatus::Incomplete
+        } else if self.problems_found() {
+            JobStatus::Problems
+        } else {
+            JobStatus::Passed
+        }
+    }
+
+    /// True when anything worth attention was found.
     pub fn problems_found(&self) -> bool {
         let health_bad = self.health.verdict.as_ref().is_some_and(|v| v.level >= VerdictLevel::Caution);
         let scan_bad =
@@ -184,6 +229,7 @@ impl Report {
             || refresh_bad
             || speed_bad
             || repair_bad
+            || self.self_test.as_ref().is_some_and(|test| test.failed)
             || !self.health.changes.is_empty()
     }
 

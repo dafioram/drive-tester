@@ -481,14 +481,21 @@ fn truncate(s: &str, n: usize) -> String {
 fn health(p: &dyn Platform, disk: u32, json: bool) -> Result<u8, String> {
     let d = find_drive(p, disk)?;
     let snap = p.read_health(disk).unwrap_or_else(|e| HealthSnapshot::unavailable(e.to_string()));
+    let v = snap.verdict();
+    let exit = if v.level >= drivetest_core::health::VerdictLevel::Caution {
+        EXIT_PROBLEMS
+    } else if !snap.is_available() && snap.sd.is_none() {
+        EXIT_ERROR
+    } else {
+        EXIT_OK
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())?);
-        return Ok(EXIT_OK);
+        return Ok(exit);
     }
     println!("{} — {}", d.title(), d.summary_line());
     print_health(&d, &snap);
-    let v = snap.verdict();
-    Ok(if v.level >= drivetest_core::health::VerdictLevel::Caution { EXIT_PROBLEMS } else { EXIT_OK })
+    Ok(exit)
 }
 
 fn print_health(d: &DriveInfo, snap: &HealthSnapshot) {
@@ -761,7 +768,12 @@ impl ProgressLine {
                 if json {
                     println!("{}", serde_json::to_string(&*report).unwrap_or_default());
                 }
-                return Some(if report.problems_found() { EXIT_PROBLEMS } else { EXIT_OK });
+                use drivetest_core::report::JobStatus;
+                return Some(match report.status() {
+                    JobStatus::Passed => EXIT_OK,
+                    JobStatus::Problems => EXIT_PROBLEMS,
+                    JobStatus::Incomplete | JobStatus::Unsupported | JobStatus::Error => EXIT_ERROR,
+                });
             }
         }
         None
@@ -793,5 +805,5 @@ fn print_summary(r: &Report) {
             eprintln!("    … {} more in the report", s.bad_sector_files.len() - 20);
         }
     }
-    eprintln!("\nResult: {}", if r.problems_found() { "PROBLEMS FOUND" } else { "PASSED" });
+    eprintln!("\nResult: {}", r.status().label().to_uppercase());
 }

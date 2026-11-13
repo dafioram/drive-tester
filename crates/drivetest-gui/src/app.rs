@@ -1070,14 +1070,14 @@ impl DriveTestApp {
         let r = &last.report;
         ui.horizontal(|ui| {
             ui.heading(&r.test.kind);
-            let (text, color) = if r.test.cancelled {
-                ("Stopped early", ORANGE)
-            } else if r.problems_found() {
-                ("Problems found", RED)
-            } else {
-                ("Passed", GREEN)
+            use drivetest_core::report::JobStatus;
+            let status = r.status();
+            let color = match status {
+                JobStatus::Passed => GREEN,
+                JobStatus::Problems | JobStatus::Error => RED,
+                JobStatus::Incomplete | JobStatus::Unsupported => ORANGE,
             };
-            ui.colored_label(color, RichText::new(text).strong());
+            ui.colored_label(color, RichText::new(status.label()).strong());
         });
         ui.weak(format!(
             "Started {} · {} test · run in {} mode",
