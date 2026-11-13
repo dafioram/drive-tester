@@ -280,9 +280,12 @@ fn refresh_one(
         }
     };
 
-    // Restore timestamps and attributes on every exit once anything was written.
+    // Check all finalization steps even after a partial rewrite.
+    let mut finalization_errors = Vec::new();
     if wrote {
-        let _ = file.sync_all();
+        if let Err(error) = file.sync_all() {
+            finalization_errors.push(format!("could not flush data: {error}"));
+        }
         let mut times = FileTimes::new();
         if let Some(m) = modified {
             times = times.set_modified(m);
@@ -290,9 +293,16 @@ fn refresh_one(
         if let Some(a) = accessed {
             times = times.set_accessed(a);
         }
-        let _ = file.set_times(times);
+        if let Err(error) = file.set_times(times) {
+            finalization_errors.push(format!("could not restore timestamps: {error}"));
+        }
         drop(file);
-        let _ = platform.restore_attributes(&path, attrs);
+        if let Err(error) = platform.restore_attributes(&path, attrs) {
+            finalization_errors.push(format!("could not restore attributes: {error}"));
+        }
+    }
+    if !finalization_errors.is_empty() {
+        return FileResult::Failed(format!("Refresh finalization failed: {}", finalization_errors.join(", ")));
     }
     match outcome {
         ChunkLoop::Done => FileResult::Refreshed { bytes: offset, retried },
@@ -381,6 +391,7 @@ pub fn run_file_refresh(
             recent_mb_s: 0.0,
         }));
     }
+    out.cancelled |= cancel.load(Ordering::Relaxed);
     out.completed = !out.cancelled;
     out
 }

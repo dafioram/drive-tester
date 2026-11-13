@@ -317,7 +317,7 @@ impl Policy {
             }
             match &d.role {
                 SystemRole::Data => Ok(false),
-                SystemRole::System { .. } | SystemRole::Undetermined { .. } if system_opt_in && targeted => Ok(true),
+                SystemRole::System { .. } if system_opt_in && targeted => Ok(true),
                 SystemRole::System { reasons } => Err(PolicyError::SystemRefreshRestricted(reasons.join("; "))),
                 SystemRole::Undetermined { reason } => Err(PolicyError::SystemRefreshRestricted(reason.clone())),
             }

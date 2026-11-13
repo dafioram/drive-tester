@@ -280,6 +280,10 @@ impl DriveTestApp {
         mount: &str,
         stale: Option<&drivetest_core::stale::StaleOutcome>,
     ) {
+        if matches!(d.role, drivetest_core::model::SystemRole::Undetermined { .. }) {
+            ui.weak("File refresh requires a confirmed system or data disk.");
+            return;
+        }
         let protected = d.is_protected();
         let slow: Vec<&drivetest_core::stale::FileSpeed> =
             stale.map(|s| s.slow_files.iter().collect()).unwrap_or_default();
@@ -309,7 +313,7 @@ impl DriveTestApp {
         if protected {
             egui::Frame::group(ui.style()).stroke(Stroke::new(1.0, ORANGE)).show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.colored_label(ORANGE, "System disk: refresh is an opt-in exception");
+                ui.colored_label(ORANGE, "System disk: experimental refresh");
                 ui.label("• Only the selected slow files are rewritten, through the file system, never raw sectors.");
                 ui.label(
                     "• Windows, Program Files, ProgramData, system files, the pagefile and files in use are skipped.",

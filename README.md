@@ -16,7 +16,7 @@ type it creates cannot be constructed anywhere else.
 | --- | --- | --- | --- |
 | Read-only | Health, self-tests, read scans, stale-data check | Allowed | Allowed |
 | Non-destructive write | Free-space verify, speed-class check (temporary files, then deleted) | **Blocked** | Read-write mode |
-| File refresh | Rewrites files in place with their own bytes | **Opt-in, selected files only** | Read-write mode |
+| File refresh | Rewrites files in place with their own bytes | **Experimental opt-in, selected files only** | Read-write mode |
 | Raw (keeps data) | Block refresh, sector remap | **Blocked, no override** | Read-write mode + typed serial number |
 | Destructive | Raw pattern writes; erases the drive | **Blocked, no override** | Read-write mode + typed serial number |
 
