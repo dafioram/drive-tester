@@ -3,7 +3,7 @@
 //! other tools can analyse results without image exports.
 
 use std::fs;
-use std::io::{self, BufWriter};
+use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -248,8 +248,24 @@ impl Report {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let file = fs::File::create(path)?;
-        serde_json::to_writer(BufWriter::new(file), self).map_err(io::Error::other)
+        let temp = path.with_extension(format!("{}.tmp", crate::signature::fresh_seed()));
+        let file = fs::OpenOptions::new().create_new(true).write(true).open(&temp)?;
+        let result = (|| {
+            let mut writer = BufWriter::new(file);
+            serde_json::to_writer(&mut writer, self).map_err(io::Error::other)?;
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+            drop(writer);
+            // Publish the complete file atomically without replacing an existing report.
+            match fs::hard_link(&temp, path) {
+                Ok(()) => Ok(()),
+                // FAT/exFAT and some remote filesystems lack hard links.
+                Err(error) if error.kind() != io::ErrorKind::AlreadyExists && !path.exists() => fs::rename(&temp, path),
+                Err(error) => Err(error),
+            }
+        })();
+        let _ = fs::remove_file(&temp);
+        result
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -263,7 +279,7 @@ impl Report {
             self.test.kind.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
         let kind = kind.split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
         let local = self.test.started_at.with_timezone(&chrono::Local);
-        format!("disk{}-{}-{}.json", self.drive.number, kind, local.format("%Y%m%d-%H%M%S"))
+        format!("disk{}-{}-{}.json", self.drive.number, kind, local.format("%Y%m%d-%H%M%S-%9f"))
     }
 }
 
