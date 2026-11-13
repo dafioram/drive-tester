@@ -92,7 +92,10 @@ pub fn check_unit(buf: &[u8], seed: u64, unit: u64, scratch: &mut [u8; UNIT]) ->
     if buf[0..8] == MAGIC && buf[8..16] == seed.to_le_bytes() {
         let found = u64::from_le_bytes(buf[16..24].try_into().expect("8 bytes"));
         if found != unit {
-            return UnitCheck::Aliased { found_unit: found };
+            fill_unit(scratch, seed, found);
+            if buf == &scratch[..] {
+                return UnitCheck::Aliased { found_unit: found };
+            }
         }
     }
     UnitCheck::Corrupt

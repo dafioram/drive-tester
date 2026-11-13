@@ -92,7 +92,7 @@ impl WriteTestConfig {
 /// Is the advertised capacity real?
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CapacityVerdict {
-    /// Advertised capacity holds data.
+    /// The tested addresses matched, or defects were found without sufficient evidence of aliasing.
     pub genuine: bool,
     /// Sectors failed verification even though the capacity is real.
     pub defects_found: bool,
@@ -350,7 +350,7 @@ fn capacity_verdict(out: &WriteTestOutcome, vmap: &BlockMap, samples: Option<u32
         let summary = match samples {
             None => format!("All {} written and verified; capacity is genuine.", format_bytes(size)),
             Some(_) => format!(
-                "All {} sampled positions across {} verified; capacity looks genuine. A full write + verify confirms it.",
+                "All {} sampled positions across {} verified. Untested positions may still alias; use full write + verify for full coverage.",
                 vmap.scanned_blocks(),
                 format_bytes(size)
             ),
@@ -371,7 +371,18 @@ fn capacity_verdict(out: &WriteTestOutcome, vmap: &BlockMap, samples: Option<u32
         }
     }
     let fraction_bad_after = if scanned_after == 0 { 0.0 } else { bad_after as f64 / scanned_after as f64 };
-    let fake = out.aliased_units > 0 || (fraction_bad_after > 0.9 && size - first_bad > size / 100);
+    let fake = out.aliased_units > 0;
+    if !fake && fraction_bad_after > 0.9 && size - first_bad > size / 100 {
+        return CapacityVerdict {
+            genuine: false,
+            defects_found: true,
+            usable_bytes_estimate: None,
+            summary: format!(
+                "An unreadable or corrupt tail begins near {}. This can reflect failing media or fake capacity; no address alias was verified.",
+                format_bytes(first_bad)
+            ),
+        };
+    }
     if fake {
         let usable = match samples {
             // Sequential full write: the last lap survives, so the blocks that
@@ -388,17 +399,12 @@ fn capacity_verdict(out: &WriteTestOutcome, vmap: &BlockMap, samples: Option<u32
             },
         } / (1 << 20)
             * (1 << 20);
-        let how = if out.aliased_units > 0 {
-            "writes past that point land on earlier data (wraparound)"
-        } else {
-            "data written past that point is lost"
-        };
         CapacityVerdict {
             genuine: false,
             defects_found: true,
             usable_bytes_estimate: Some(usable),
             summary: format!(
-                "Fake capacity: the drive reports {} but only about {} holds data; {how}. Typical of counterfeit flash.",
+                "Address aliasing detected across {}. About {} may be usable (approximate). This pattern is typical of fake-capacity media.",
                 format_bytes(size),
                 format_bytes(usable)
             ),
@@ -409,7 +415,7 @@ fn capacity_verdict(out: &WriteTestOutcome, vmap: &BlockMap, samples: Option<u32
             defects_found: true,
             usable_bytes_estimate: None,
             summary: format!(
-                "{bad_units} sectors failed verification ({} write errors). Capacity appears genuine, but the drive has defects.",
+                "{bad_units} sectors failed verification ({} write errors). Capacity remains unverified.",
                 out.write_errors
             ),
         }
