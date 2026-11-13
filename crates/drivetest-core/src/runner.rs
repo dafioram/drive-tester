@@ -476,6 +476,12 @@ fn build_scan_report(
         Vec::new()
     } else {
         let take = outcome.bad_sectors.len().min(1000);
+        if take < outcome.bad_sectors.len() {
+            log.push(format!(
+                "File lookup covers the first {take} of {} unreadable sectors.",
+                outcome.bad_sectors.len()
+            ));
+        }
         match platform.map_sectors_to_files(drive, sector, &outcome.bad_sectors[..take]) {
             Ok(v) => v,
             Err(e) => {

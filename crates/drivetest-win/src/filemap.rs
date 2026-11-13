@@ -24,12 +24,10 @@ const ENTRY_NAME_AT: usize = offset_of!(LOOKUP_STREAM_FROM_CLUSTER_ENTRY, FileNa
 /// Finds which volume (and cluster) a byte offset on `disk` falls in.
 fn locate(volumes: &[VolumeRecord], disk: u32, byte: u64) -> Option<(usize, u64)> {
     for (i, v) in volumes.iter().enumerate() {
-        let mut volume_offset = 0u64;
         for e in &v.extents {
-            if e.disk == disk && byte >= e.offset && byte < e.offset + e.length {
-                return Some((i, volume_offset + (byte - e.offset)));
+            if e.disk == disk && byte >= e.offset && byte - e.offset < e.length {
+                return Some((i, byte - e.offset));
             }
-            volume_offset += e.length;
         }
     }
     None
@@ -76,13 +74,24 @@ fn lookup(volume: &VolumeRecord, clusters: &[i64]) -> Result<Vec<(i64, u32, Stri
 pub fn map(disk: u32, lbas: &[u64], sector: u64, volumes: &[VolumeRecord]) -> Vec<SectorFile> {
     let mut out = Vec::with_capacity(lbas.len());
     // volume index -> [(lba, cluster)]
+    let unknown_layout = volumes.iter().any(VolumeRecord::location_unknown);
     let mut per_volume: BTreeMap<usize, Vec<(u64, i64)>> = BTreeMap::new();
     for &lba in lbas {
         match locate(volumes, disk, lba * sector) {
-            None => out
-                .push(SectorFile { lba, location: "Outside any volume (partition table or unallocated space)".into() }),
+            None => out.push(SectorFile {
+                lba,
+                location: if unknown_layout {
+                    "Volume location could not be confirmed".into()
+                } else {
+                    "Outside any known volume (partition metadata or unallocated space)".into()
+                },
+            }),
             Some((vi, voff)) => {
                 let v = &volumes[vi];
+                if v.extents.len() != 1 {
+                    out.push(SectorFile { lba, location: "File lookup unavailable on multi-extent volumes".into() });
+                    continue;
+                }
                 let Some(mount) = v.mount_points.first() else {
                     out.push(SectorFile { lba, location: format!("Unmounted volume {}", v.guid_path) });
                     continue;
