@@ -110,6 +110,10 @@ pub fn run(
         }
         let started = Instant::now();
         let result = reader.read_at(offset, &mut buffer[..length as usize]);
+        if cancel.load(Ordering::Relaxed) {
+            outcome.cancelled = true;
+            break;
+        }
         let latency_us = duration_us(reader.simulated_latency().unwrap_or_else(|| started.elapsed()));
         let state = match result {
             Ok(()) if latency_us >= SLOW_THRESHOLD_US => RecheckState::StillSlow,

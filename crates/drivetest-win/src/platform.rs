@@ -201,6 +201,13 @@ impl Platform for WinPlatform {
         Ok(Box::new(lock_and_dismount(auth.disk_number())?))
     }
 
+    fn cancel_read_io(&self, worker: &std::thread::JoinHandle<()>) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::IO::CancelSynchronousIo;
+        // SAFETY: the worker handle is borrowed for the duration of the call.
+        unsafe { CancelSynchronousIo(worker.as_raw_handle() as HANDLE) };
+    }
+
     fn read_health(&self, disk: u32) -> Result<HealthSnapshot, PlatformError> {
         let bus = self.bus_of(disk);
         let mut snap = health::read(disk, bus)?;

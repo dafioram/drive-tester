@@ -105,6 +105,9 @@ pub trait Platform: Send + Sync {
     /// returned guard unlocks them.
     fn lock_volumes(&self, auth: &WriteAuthorization) -> io::Result<Box<dyn Any + Send>>;
 
+    /// Best-effort interruption of pending I/O for a read-only job.
+    fn cancel_read_io(&self, _worker: &std::thread::JoinHandle<()>) {}
+
     /// Reads SMART or NVMe health. Never writes user data.
     fn read_health(&self, disk: u32) -> Result<HealthSnapshot, PlatformError>;
 

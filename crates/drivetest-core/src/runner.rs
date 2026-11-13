@@ -137,14 +137,18 @@ pub struct JobHandle {
     events: Receiver<JobEvent>,
     cancel: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    read_canceller: Option<Arc<dyn Platform>>,
     pub disk: u32,
     pub name: String,
 }
 
 impl JobHandle {
-    /// Asks the job to stop at the next block. A partial report is still produced.
+    /// Requests cancellation, including best-effort interruption of raw read I/O.
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
+        if let (Some(platform), Some(thread)) = (&self.read_canceller, &self.thread) {
+            platform.cancel_read_io(thread);
+        }
     }
 
     pub fn cancel_requested(&self) -> bool {
@@ -168,7 +172,9 @@ impl JobHandle {
 
 impl Drop for JobHandle {
     fn drop(&mut self) {
-        self.cancel.store(true, Ordering::Relaxed);
+        if !self.is_finished() {
+            self.cancel();
+        }
     }
 }
 
@@ -179,6 +185,7 @@ pub fn start_job(platform: Arc<dyn Platform>, request: JobRequest) -> JobHandle 
     let job_cancel = cancel.clone();
     let disk = request.drive.number;
     let name = request.kind.name();
+    let read_canceller = matches!(&request.kind, JobKind::ReadScan(_) | JobKind::Recheck(_)).then(|| platform.clone());
     let thread = thread::Builder::new()
         .name(format!("drivetest-disk{disk}"))
         .spawn(move || {
@@ -205,7 +212,7 @@ pub fn start_job(platform: Arc<dyn Platform>, request: JobRequest) -> JobHandle 
             let _ = tx.send(event);
         })
         .expect("spawn job thread");
-    JobHandle { events: rx, cancel, thread: Some(thread), disk, name }
+    JobHandle { events: rx, cancel, thread: Some(thread), read_canceller, disk, name }
 }
 
 fn read_health(platform: &dyn Platform, disk: u32) -> HealthSnapshot {
@@ -392,8 +399,18 @@ pub fn run_job(
     }
 
     log.extend(post_log);
-    send(JobEvent::Phase("Reading health data".into()));
-    let after = read_health(platform, disk);
+    let after = if report.test.cancelled || report.test.error.is_some() {
+        HealthSnapshot::unavailable("Post-test health skipped after an interrupted job")
+    } else if matches!(req.kind, JobKind::ReadScan(_) | JobKind::Recheck(_))
+        && !platform
+            .enumerate()
+            .is_ok_and(|drives| drives.iter().any(|drive| drive.number == disk && drive.same_device(&report.drive)))
+    {
+        HealthSnapshot::unavailable("Drive identity changed before the post-test health snapshot")
+    } else {
+        send(JobEvent::Phase("Reading health data".into()));
+        read_health(platform, disk)
+    };
     report.health.changes = health_changes(&before, &after);
     report.health.verdict = Some(if after.is_available() { after.verdict() } else { before.verdict() });
     let identify = after.identify().or(before.identify()).cloned();

@@ -340,7 +340,8 @@ pub fn run_read_scan(
             result = r;
             elapsed += e;
         }
-        if cancelled {
+        if cancelled || cancel.load(Ordering::Relaxed) {
+            cancelled = true;
             break;
         }
         if let Err(e) = &result
@@ -367,7 +368,9 @@ pub fn run_read_scan(
                         Ok(false) => unresolved_blocks.push(index),
                         Err(e) => {
                             unresolved_blocks.push(index);
-                            error = Some(format!("Pinpointing stopped in block at byte {offset}: {e}"));
+                            if !cancel.load(Ordering::Relaxed) {
+                                error = Some(format!("Pinpointing stopped in block at byte {offset}: {e}"));
+                            }
                         }
                     }
                 } else {
