@@ -18,6 +18,7 @@ pub struct WinDisk {
     handle: Handle,
     size: u64,
     sector: u32,
+    buffer_alignment: usize,
 }
 
 impl WinDisk {
@@ -48,11 +49,17 @@ impl WinDisk {
     fn open(disk: u32, access: u32) -> io::Result<Self> {
         let handle = open(&disk_path(disk), access, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)?;
         let size = enumerate::length(&handle)?;
-        let sector = enumerate::alignment(&handle)
-            .map(|(l, _)| l)
-            .or_else(|| enumerate::geometry_sector(&handle))
-            .unwrap_or(512);
-        Ok(Self { handle, size, sector })
+        let (sector, physical) = enumerate::alignment(&handle)
+            .or_else(|| enumerate::geometry_sector(&handle).map(|s| (s, s)))
+            .ok_or_else(|| io::Error::other("could not determine the disk sector alignment"))?;
+        let buffer_alignment = physical as usize;
+        if !buffer_alignment.is_power_of_two() || buffer_alignment > drivetest_core::aligned::IO_ALIGN {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("Unsupported I/O buffer alignment: {physical} bytes"),
+            ));
+        }
+        Ok(Self { handle, size, sector, buffer_alignment })
     }
 
     fn seek(&self, offset: u64) -> io::Result<()> {
@@ -85,6 +92,12 @@ impl RawReader for WinDisk {
 
     fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> io::Result<()> {
         self.check(offset, buf.len())?;
+        if !((buf.as_ptr() as usize).is_multiple_of(self.buffer_alignment)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "I/O buffer does not meet physical-sector alignment",
+            ));
+        }
         self.seek(offset)?;
         let mut done = 0usize;
         while done < buf.len() {
@@ -113,6 +126,12 @@ impl RawReader for WinDisk {
 impl RawWriter for WinDisk {
     fn write_at(&mut self, offset: u64, buf: &[u8]) -> io::Result<()> {
         self.check(offset, buf.len())?;
+        if !((buf.as_ptr() as usize).is_multiple_of(self.buffer_alignment)) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "I/O buffer does not meet physical-sector alignment",
+            ));
+        }
         self.seek(offset)?;
         let mut done = 0usize;
         while done < buf.len() {

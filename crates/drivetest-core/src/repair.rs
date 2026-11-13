@@ -249,8 +249,7 @@ pub fn run_remap(
             };
             let status = if readable {
                 // Still readable: keep its data, just rewrite it.
-                let data = sector_buf.to_vec();
-                if write_verified(dev, offset, &data, &mut sector_scratch) {
+                if write_verified(dev, offset, &sector_buf, &mut sector_scratch) {
                     sum.refreshed_sectors.push(lba);
                     BlockStatus::Ok
                 } else {
