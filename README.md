@@ -111,7 +111,7 @@ drivers refuse the command. In each case the app reports what it could not read.
 ## Requirements
 
 - Windows 10 or 11, x64.
-- Rust 1.88 or newer with the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`)
+- Rust 1.95 or newer with the MSVC toolchain (`rustup default stable-x86_64-pc-windows-msvc`)
   and the Visual Studio Build Tools (C++ workload) for the linker.
 - Administrator rights for real drives. The GUI asks for them through its manifest; run the CLI
   from an Administrator terminal.
