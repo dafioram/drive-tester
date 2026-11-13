@@ -59,12 +59,21 @@ fn is_zero(buf: &[u8]) -> bool {
 }
 
 /// Writes `data` at `offset` and confirms it reads back; retries once.
-fn write_verified(dev: &mut dyn RawWriter, offset: u64, data: &[u8], scratch: &mut [u8]) -> bool {
+fn write_verified(
+    dev: &mut dyn RawWriter,
+    offset: u64,
+    data: &[u8],
+    scratch: &mut [u8],
+    flush_error: &mut Option<String>,
+) -> bool {
     for _ in 0..2 {
         if dev.write_at(offset, data).is_err() {
             continue;
         }
-        let _ = dev.flush();
+        if let Err(error) = dev.flush() {
+            *flush_error = Some(error.to_string());
+            return false;
+        }
         if dev.read_at(offset, &mut scratch[..data.len()]).is_ok() && scratch[..data.len()] == *data {
             return true;
         }
@@ -112,7 +121,7 @@ pub fn run_block_refresh(
         } else if slower_than_us.is_some_and(|t| lat < t) {
             sum.fast_blocks_skipped += 1;
             BlockStatus::Ok
-        } else if write_verified(dev, offset, &buf[..len], &mut scratch) {
+        } else if write_verified(dev, offset, &buf[..len], &mut scratch, &mut out.flush_error) {
             sum.blocks_rewritten += 1;
             sum.bytes_rewritten += len as u64;
             out.bytes_written += len as u64;
@@ -125,11 +134,14 @@ pub fn run_block_refresh(
             BlockStatus::Error
         };
         out.write_map.set(index, lat, status);
+        if out.flush_error.is_some() {
+            break;
+        }
         batcher.push(Some(BlockUpdate { index, latency_us: lat, status }), len as u64);
     }
     batcher.flush();
     out.repair = Some(sum);
-    out.completed = !out.cancelled;
+    out.completed = !out.cancelled && out.flush_error.is_none();
     out.elapsed = start.elapsed();
     out
 }
@@ -211,7 +223,7 @@ pub fn run_remap(
                 }
                 Ok(()) => {
                     if refresh_slower_than_us.is_some_and(|t| lat >= t) && !is_zero(&buf[..len]) {
-                        if write_verified(dev, offset, &buf[..len], &mut scratch) {
+                        if write_verified(dev, offset, &buf[..len], &mut scratch, &mut out.flush_error) {
                             sum.blocks_rewritten += 1;
                             sum.bytes_rewritten += len as u64;
                             out.bytes_written += len as u64;
@@ -223,13 +235,16 @@ pub fn run_remap(
                 }
             };
             out.write_map.set(index, lat, status);
+            if out.flush_error.is_some() {
+                break;
+            }
             batcher.push(Some(BlockUpdate { index, latency_us: lat, status }), len as u64);
         }
     }
     candidates.sort_unstable();
     candidates.dedup();
 
-    if !out.cancelled && sum.aborted.is_none() && !candidates.is_empty() {
+    if !out.cancelled && sum.aborted.is_none() && out.flush_error.is_none() && !candidates.is_empty() {
         let mut vmap = BlockMap::new(size, bs);
         batcher.pass("Remapping sectors", candidates.len() as u64, vmap.total_blocks(), bs);
         batcher.log(format!("{} sectors to treat", candidates.len()));
@@ -249,7 +264,7 @@ pub fn run_remap(
             };
             let status = if readable {
                 // Still readable: keep its data, just rewrite it.
-                if write_verified(dev, offset, &sector_buf, &mut sector_scratch) {
+                if write_verified(dev, offset, &sector_buf, &mut sector_scratch, &mut out.flush_error) {
                     sum.refreshed_sectors.push(lba);
                     BlockStatus::Ok
                 } else {
@@ -257,7 +272,7 @@ pub fn run_remap(
                     sum.still_bad_sectors.push(lba);
                     BlockStatus::Error
                 }
-            } else if write_verified(dev, offset, &zeros, &mut sector_scratch) {
+            } else if write_verified(dev, offset, &zeros, &mut sector_scratch, &mut out.flush_error) {
                 out.bytes_written += sector;
                 sum.remapped_sectors.push(lba);
                 BlockStatus::Ok
@@ -268,6 +283,9 @@ pub fn run_remap(
             };
             let index = offset / u64::from(bs);
             vmap.set(index, 0, status);
+            if out.flush_error.is_some() {
+                break;
+            }
             batcher.push(Some(BlockUpdate { index, latency_us: 0, status }), sector);
         }
         out.verify_map = Some(vmap);
@@ -279,7 +297,7 @@ pub fn run_remap(
     if let Some(error) = &sum.aborted {
         batcher.log(error);
     }
-    out.completed = !out.cancelled && sum.aborted.is_none();
+    out.completed = !out.cancelled && sum.aborted.is_none() && out.flush_error.is_none();
     out.repair = Some(sum);
     out.elapsed = start.elapsed();
     out

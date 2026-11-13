@@ -49,6 +49,9 @@ impl WinDisk {
     fn open(disk: u32, access: u32) -> io::Result<Self> {
         let handle = open(&disk_path(disk), access, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH)?;
         let size = enumerate::length(&handle)?;
+        if size == 0 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "The drive reported zero usable bytes"));
+        }
         let (sector, physical) = enumerate::alignment(&handle)
             .or_else(|| enumerate::geometry_sector(&handle).map(|s| (s, s)))
             .ok_or_else(|| io::Error::other("could not determine the disk sector alignment"))?;

@@ -138,6 +138,8 @@ pub struct WriteTestReport {
     pub bytes_written: u64,
     pub elapsed_s: f64,
     pub write_errors: u64,
+    #[serde(default)]
+    pub flush_error: Option<String>,
     pub corrupt_units: u64,
     pub aliased_units: u64,
     pub unreadable_units: u64,

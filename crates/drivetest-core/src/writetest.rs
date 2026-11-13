@@ -119,6 +119,7 @@ pub struct WriteTestOutcome {
     pub write_map: BlockMap,
     pub verify_map: Option<BlockMap>,
     pub bytes_written: u64,
+    pub flush_error: Option<String>,
     pub write_errors: u64,
     pub corrupt_units: u64,
     pub aliased_units: u64,
@@ -146,6 +147,7 @@ impl WriteTestOutcome {
             verify_map: None,
             bytes_written: 0,
             write_errors: 0,
+            flush_error: None,
             corrupt_units: 0,
             aliased_units: 0,
             unreadable_units: 0,
@@ -171,6 +173,7 @@ impl WriteTestOutcome {
 
     pub fn problems_found(&self) -> bool {
         self.write_errors + self.corrupt_units + self.aliased_units + self.unreadable_units > 0
+            || self.flush_error.is_some()
             || self.capacity.as_ref().is_some_and(|c| !c.genuine)
     }
 }
@@ -280,6 +283,7 @@ fn run_pattern(
         && let Err(e) = dev.flush()
     {
         batcher.log(format!("Flush failed: {e}"));
+        out.flush_error = Some(e.to_string());
     }
 
     if !out.cancelled {
@@ -326,7 +330,7 @@ fn run_pattern(
             batcher.push(Some(BlockUpdate { index, latency_us: latency, status }), len as u64);
         }
         batcher.flush();
-        if !out.cancelled {
+        if !out.cancelled && out.flush_error.is_none() {
             out.capacity = Some(capacity_verdict(&out, &vmap, samples));
             if samples.is_none() {
                 out.cache_cliff = analysis::cache_cliff(&out.write_map);
@@ -334,7 +338,7 @@ fn run_pattern(
         }
         out.verify_map = Some(vmap);
     }
-    out.completed = !out.cancelled;
+    out.completed = !out.cancelled && out.flush_error.is_none();
     out.elapsed = start.elapsed();
     out
 }
@@ -447,8 +451,7 @@ fn run_smr(
     let io = aligned_block_size(256 << 10, dev.logical_sector_size());
     let mut out = WriteTestOutcome::empty(cfg.kind.clone(), size, MAP_BLOCK);
     let units = size / u64::from(io);
-    if units == 0 {
-        out.completed = true;
+    if units == 0 || max_bytes == 0 || max_secs == 0 {
         return out;
     }
     let mut rng = SplitMix64::new(cfg.seed);
@@ -510,7 +513,9 @@ fn run_smr(
         windows.push(win_bytes as f64 / 1e6 / win_io);
         window_bytes_end.push(out.bytes_written);
     }
-    let _ = dev.flush();
+    if let Err(error) = dev.flush() {
+        out.flush_error = Some(error.to_string());
+    }
     batcher.flush();
 
     let early = early_rate(&windows);
@@ -533,7 +538,7 @@ fn run_smr(
         collapsed,
         collapse_after_bytes,
     });
-    out.completed = !out.cancelled || stopped_early;
+    out.completed = (!out.cancelled || stopped_early) && out.flush_error.is_none();
     out.elapsed = start.elapsed();
     out
 }

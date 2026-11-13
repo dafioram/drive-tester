@@ -350,7 +350,11 @@ pub fn run_job(
                 report.test.completed = out.completed;
                 report.test.cancelled = out.cancelled;
                 write_probe = out.smr.clone();
-                report.test.error = out.repair.as_ref().and_then(|repair| repair.aborted.clone());
+                report.test.error = out
+                    .flush_error
+                    .as_ref()
+                    .map(|e| format!("Could not flush drive writes: {e}"))
+                    .or_else(|| out.repair.as_ref().and_then(|repair| repair.aborted.clone()));
                 report.write_test = Some(build_write_report(out));
             }
         }
@@ -508,6 +512,7 @@ fn build_write_report(out: WriteTestOutcome) -> WriteTestReport {
         bytes_written: out.bytes_written,
         elapsed_s: out.elapsed.as_secs_f64(),
         write_errors: out.write_errors,
+        flush_error: out.flush_error,
         corrupt_units: out.corrupt_units,
         aliased_units: out.aliased_units,
         unreadable_units: out.unreadable_units,
@@ -528,6 +533,9 @@ fn build_write_report(out: WriteTestOutcome) -> WriteTestReport {
 /// Plain-language findings, most important first.
 pub fn findings(r: &Report) -> Vec<String> {
     let mut f = Vec::new();
+    if let Some(error) = &r.test.error {
+        f.push(error.clone());
+    }
     if r.test.cancelled {
         f.push("The test was stopped before it finished; results cover only the part completed.".into());
     }
