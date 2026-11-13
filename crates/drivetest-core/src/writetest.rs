@@ -509,7 +509,7 @@ fn run_smr(
                 let early = early_rate(&windows);
                 if windows[windows.len() - 6..].iter().all(|&w| w < 0.35 * early) {
                     stopped_early = true;
-                    batcher.log("Throughput collapse confirmed; stopping early.");
+                    batcher.log("Sustained throughput drop observed; stopping early.");
                     break;
                 }
             }

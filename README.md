@@ -71,7 +71,7 @@ type it creates cannot be constructed anywhere else.
 
 **Speed-class check** (non-destructive)
 - Writes a temporary file and measures sustained sequential write (slowest 64 MB window),
-  sequential read, and random 4K read / write IOPS, then compares them with C2–C10, U1/U3,
+  sequential read, and random 4K read / write IOPS, then compares this host-and-card setup with indicative thresholds for C2–C10, U1/U3,
   V6–V90 and A1/A2. Ratings are pre-filled from the card's SD Status register when available.
 
 **Maintenance**

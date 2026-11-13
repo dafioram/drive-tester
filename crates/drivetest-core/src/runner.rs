@@ -380,7 +380,7 @@ pub fn run_job(
                 drop(session);
                 report.test.completed = out.completed;
                 report.test.cancelled = out.cancelled;
-                write_probe = out.smr.clone();
+                write_probe = out.smr.as_ref().filter(|_| out.completed && out.write_errors == 0).cloned();
                 report.test.error = out
                     .flush_error
                     .as_ref()
@@ -642,6 +642,7 @@ pub fn findings(r: &Report) -> Vec<String> {
         }
     }
     if let Some(sc) = &r.speed_class {
+        f.push(sc.note.clone());
         f.push(format!(
             "Sequential write {:.1} MB/s (slowest window {:.1}), read {:.1} MB/s, random 4K {:.0} read / {:.0} write IOPS.",
             sc.seq_write_avg_mb_s, sc.seq_write_min_mb_s, sc.seq_read_mb_s, sc.random_read_iops, sc.random_write_iops
@@ -656,7 +657,7 @@ pub fn findings(r: &Report) -> Vec<String> {
             ));
         }
         if let Some(best) = &sc.best_class_met {
-            f.push(format!("Highest write class met: {best}."));
+            f.push(format!("Highest write class threshold met on this setup: {best}."));
         }
     }
     if let Some(w) = &r.write_test

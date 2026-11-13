@@ -703,13 +703,13 @@ pub fn assess_smr(
             evidence: "Solid-state drives do not use shingled recording".into(),
         };
     }
-    if let Some(p) = write_probe {
+    if let Some(p) = write_probe.filter(|p| p.windows_mb_s.len() >= 4) {
         return if p.collapsed {
             SmrAssessment {
-                verdict: RecordingVerdict::Smr,
+                verdict: RecordingVerdict::LikelySmr,
                 layer: "write test".into(),
                 evidence: format!(
-                    "Random-write throughput fell from {:.1} MB/s to {:.1} MB/s{}",
+                    "Suggestive only: random-write throughput fell from {:.1} MB/s to {:.1} MB/s{}",
                     p.early_mb_s,
                     p.late_mb_s,
                     p.collapse_after_bytes
@@ -719,10 +719,10 @@ pub fn assess_smr(
             }
         } else {
             SmrAssessment {
-                verdict: RecordingVerdict::Cmr,
+                verdict: RecordingVerdict::Unknown,
                 layer: "write test".into(),
                 evidence: format!(
-                    "Random-write throughput held steady ({:.1} → {:.1} MB/s over {})",
+                    "Recording type remains unknown: random-write throughput held steady ({:.1} → {:.1} MB/s over {})",
                     p.early_mb_s,
                     p.late_mb_s,
                     crate::model::format_bytes(p.bytes_written)
@@ -767,7 +767,7 @@ pub fn assess_smr(
         verdict: RecordingVerdict::Unknown,
         layer: "none".into(),
         evidence: if media == MediaKind::Hdd {
-            "No self-report or hints; the SMR write test can confirm".into()
+            "No self-report or hints; the SMR write test can look for a sustained throughput drop".into()
         } else {
             "Media type unknown".into()
         },

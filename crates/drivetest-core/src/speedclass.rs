@@ -97,7 +97,7 @@ pub struct SpeedClassOutcome {
 
 impl SpeedClassOutcome {
     pub fn problems_found(&self) -> bool {
-        self.results.iter().any(|r| !r.pass)
+        !self.cleanup_ok || self.results.iter().any(|result| !result.pass)
     }
 }
 
@@ -159,7 +159,7 @@ fn measure(
         cleanup_ok: false,
         completed: false,
         cancelled: false,
-        note: "Indicative: official ratings are measured on a freshly erased card.".into(),
+        note: "Indicative host-and-card benchmark. SD class qualification uses specified media, host and workload conditions. A2 depends on host queueing and cache support.".into(),
     };
     let mut buf = AlignedBuf::new(CHUNK);
     let total_chunks = size / CHUNK as u64;
@@ -243,7 +243,7 @@ fn measure(
         file.write_all(&small).map_err(|e| e.to_string())?;
         ops += 1;
     }
-    let _ = file.sync_all();
+    file.sync_all().map_err(|e| format!("Random-write flush failed: {e}"))?;
     out.random_write_iops = ops as f64 / start.elapsed().as_secs_f64().max(1e-6);
     if cancel.load(Ordering::Relaxed) {
         out.cancelled = true;
@@ -263,9 +263,12 @@ fn measure(
         } else if let Some((r, w)) = min_iops(&c) {
             out.results.push(ClassResult {
                 class: c.clone(),
-                requirement: format!("≥ {r:.0} read / {w:.0} write IOPS (4K random)"),
-                measured: format!("{:.0} / {:.0} IOPS", out.random_read_iops, out.random_write_iops),
-                pass: out.random_read_iops >= r && out.random_write_iops >= w,
+                requirement: format!("≥ {r:.0} read / {w:.0} write IOPS (4K random) and ≥ 10 MB/s sequential write"),
+                measured: format!(
+                    "{:.0} / {:.0} IOPS and {:.1} MB/s slowest window",
+                    out.random_read_iops, out.random_write_iops, out.seq_write_min_mb_s
+                ),
+                pass: out.random_read_iops >= r && out.random_write_iops >= w && out.seq_write_min_mb_s >= 10.0,
             });
         }
     }

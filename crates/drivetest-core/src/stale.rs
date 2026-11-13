@@ -274,7 +274,7 @@ pub fn run_stale_check(
     } else if stale_detected {
         format!(
             "Old data reads markedly slower: about {old_median:.0} MB/s versus {recent:.0} MB/s for recent files. \
-             A targeted refresh of the {} slow files is likely to help.",
+             Modification dates only approximate data age. {} files fell below the speed threshold.",
             slow_files.len()
         )
     } else if recent == 0.0 || old.is_empty() {
