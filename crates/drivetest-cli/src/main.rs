@@ -527,7 +527,9 @@ fn health(p: &dyn Platform, disk: u32, json: bool) -> Result<u8, String> {
         EXIT_OK
     };
     if json {
-        println!("{}", serde_json::to_string_pretty(&snap).map_err(|e| e.to_string())?);
+        let mut value = serde_json::to_value(&snap).map_err(|e| e.to_string())?;
+        value["health_score"] = serde_json::to_value(snap.health_score(d.media)).map_err(|e| e.to_string())?;
+        println!("{}", serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?);
         return Ok(exit);
     }
     println!("{} — {}", d.title(), d.summary_line());
@@ -536,6 +538,15 @@ fn health(p: &dyn Platform, disk: u32, json: bool) -> Result<u8, String> {
 }
 
 fn print_health(d: &DriveInfo, snap: &HealthSnapshot) {
+    if let Some(score) = snap.health_score(d.media) {
+        println!("Custom health score: {}% ({})", score.percent, score.status.label());
+        println!("  Base {}% ({})", score.base_percent, score.base_source);
+        for reason in score.adjustments {
+            println!("  {reason}");
+        }
+    } else {
+        println!("Custom health score: unavailable");
+    }
     let v = snap.verdict();
     println!("\nVerdict: {}", v.level.label());
     for r in &v.reasons {

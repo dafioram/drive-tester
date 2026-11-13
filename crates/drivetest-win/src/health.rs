@@ -6,15 +6,15 @@ use std::io;
 use std::mem::{offset_of, size_of};
 
 use drivetest_core::health::{
-    AtaHealth, HealthSnapshot, parse_ata_identify, parse_ata_smart, parse_nvme_health, parse_nvme_self_test_log,
-    parse_self_test_status,
+    AtaHealth, HealthSnapshot, parse_ata_endurance_page, parse_ata_identify, parse_ata_smart, parse_nvme_health,
+    parse_nvme_self_test_log, parse_self_test_status,
 };
 use drivetest_core::model::{BusType, HealthSource};
 use drivetest_core::platform::{PlatformError, SelfTestKind};
 use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, GENERIC_READ, GENERIC_WRITE};
 use windows_sys::Win32::Storage::IscsiDisc::{
-    ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH, IOCTL_SCSI_PASS_THROUGH,
-    SCSI_IOCTL_DATA_IN, SCSI_IOCTL_DATA_UNSPECIFIED, SCSI_PASS_THROUGH,
+    ATA_FLAGS_48BIT_COMMAND, ATA_FLAGS_DATA_IN, ATA_FLAGS_DRDY_REQUIRED, ATA_PASS_THROUGH_EX, IOCTL_ATA_PASS_THROUGH,
+    IOCTL_SCSI_PASS_THROUGH, SCSI_IOCTL_DATA_IN, SCSI_IOCTL_DATA_UNSPECIFIED, SCSI_PASS_THROUGH,
 };
 use windows_sys::Win32::System::Ioctl::{
     IOCTL_STORAGE_PROTOCOL_COMMAND, IOCTL_STORAGE_QUERY_PROPERTY, NVMeDataTypeLogPage, PropertyStandardQuery,
@@ -61,6 +61,11 @@ enum Transport {
     Sat,
 }
 
+struct AtaReply {
+    data: [u8; SECTOR],
+    status_signature: Option<(u8, u8)>,
+}
+
 struct AtaCommand {
     features: u8,
     count: u8,
@@ -91,11 +96,14 @@ fn smart(features: u8, lba_low: u8, data_in: bool) -> AtaCommand {
     }
 }
 
-fn run_ata(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
+fn run_ata(h: &Handle, cmd: &AtaCommand) -> io::Result<AtaReply> {
     // SAFETY: plain-old-data structure; all-zero is a valid initial state.
     let mut buf: AtaBuffer = unsafe { std::mem::zeroed() };
     buf.apt.Length = size_of::<ATA_PASS_THROUGH_EX>() as u16;
     buf.apt.AtaFlags = (ATA_FLAGS_DRDY_REQUIRED | if cmd.data_in { ATA_FLAGS_DATA_IN } else { 0 }) as u16;
+    if cmd.command == 0x2F {
+        buf.apt.AtaFlags |= ATA_FLAGS_48BIT_COMMAND as u16;
+    }
     buf.apt.DataTransferLength = if cmd.data_in { SECTOR as u32 } else { 0 };
     buf.apt.TimeOutValue = 10;
     buf.apt.DataBufferOffset = offset_of!(AtaBuffer, data);
@@ -105,10 +113,10 @@ fn run_ata(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
     if buf.apt.CurrentTaskFile[6] & 0x01 != 0 {
         return Err(io::Error::other("the drive rejected the ATA command"));
     }
-    Ok(buf.data)
+    Ok(AtaReply { data: buf.data, status_signature: Some((buf.apt.CurrentTaskFile[3], buf.apt.CurrentTaskFile[4])) })
 }
 
-fn run_sat(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
+fn run_sat(h: &Handle, cmd: &AtaCommand) -> io::Result<AtaReply> {
     // SAFETY: plain-old-data structure; all-zero is a valid initial state.
     let mut buf: ScsiBuffer = unsafe { std::mem::zeroed() };
     buf.spt.Length = size_of::<SCSI_PASS_THROUGH>() as u16;
@@ -121,10 +129,11 @@ fn run_sat(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
     buf.spt.SenseInfoOffset = offset_of!(ScsiBuffer, sense) as u32;
     // ATA PASS-THROUGH(16): protocol 4 = PIO data-in, 3 = non-data.
     let (protocol, flags) = if cmd.data_in { (4u8, 0x0Eu8) } else { (3u8, 0x00u8) };
+    let returns_status = cmd.command == SMART && cmd.features == 0xDA;
     buf.spt.Cdb = [
         0x85,
-        protocol << 1,
-        flags,
+        (protocol << 1) | u8::from(cmd.command == 0x2F),
+        flags | if returns_status { 0x20 } else { 0 },
         0,
         cmd.features,
         0,
@@ -140,10 +149,32 @@ fn run_sat(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
         0,
     ];
     ioctl_inplace(h, IOCTL_SCSI_PASS_THROUGH, &mut buf)?;
+    if returns_status && buf.spt.ScsiStatus == 2 {
+        let signature = sat_status_signature(&buf.sense);
+        if signature.is_some() {
+            return Ok(AtaReply { data: buf.data, status_signature: signature });
+        }
+    }
     if buf.spt.ScsiStatus != 0 {
         return Err(io::Error::other("the USB bridge rejected the SAT command"));
     }
-    Ok(buf.data)
+    Ok(AtaReply { data: buf.data, status_signature: None })
+}
+
+fn sat_status_signature(sense: &[u8]) -> Option<(u8, u8)> {
+    if !matches!(sense.first().map(|byte| byte & 0x7f), Some(0x72 | 0x73)) {
+        return None;
+    }
+    let mut tail = sense.get(8..(8 + usize::from(*sense.get(7)?)).min(sense.len()))?;
+    while tail.len() >= 2 {
+        let length = usize::from(tail[1]) + 2;
+        let descriptor = tail.get(..length)?;
+        if descriptor[0] == 0x09 && length >= 14 {
+            return (descriptor[13] & 1 == 0).then_some((descriptor[9], descriptor[11]));
+        }
+        tail = &tail[length..];
+    }
+    None
 }
 
 /// Only these commands are ever sent: IDENTIFY DEVICE, and SMART READ DATA,
@@ -151,18 +182,27 @@ fn run_sat(h: &Handle, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
 /// user data. Anything else is refused, so a later edit cannot slip in a write.
 fn allowed(cmd: &AtaCommand) -> bool {
     match cmd.command {
-        0xEC => true,
+        0xEC => cmd.data_in,
+        0x2F => {
+            cmd.data_in
+                && cmd.features == 0
+                && cmd.count == 1
+                && cmd.lba_low == 4
+                && cmd.lba_mid == 7
+                && cmd.lba_high == 0
+        }
         SMART => {
             let read = matches!(cmd.features, 0xD0 | 0xD1);
             // Self-test in off-line mode only (1 = short, 2 = extended), never captive.
             let self_test = cmd.features == 0xD4 && matches!(cmd.lba_low, 1 | 2);
-            (read || self_test) && cmd.lba_mid == SMART_MID && cmd.lba_high == SMART_HIGH
+            let status = cmd.features == 0xDA && !cmd.data_in && cmd.lba_low == 0;
+            (read || self_test || status) && cmd.lba_mid == SMART_MID && cmd.lba_high == SMART_HIGH
         }
         _ => false,
     }
 }
 
-fn run(h: &Handle, t: Transport, cmd: &AtaCommand) -> io::Result<[u8; SECTOR]> {
+fn run(h: &Handle, t: Transport, cmd: &AtaCommand) -> io::Result<AtaReply> {
     if !allowed(cmd) {
         return Err(io::Error::new(io::ErrorKind::PermissionDenied, "ATA command not on the read-only allowlist"));
     }
@@ -178,13 +218,27 @@ fn checksum_ok(data: &[u8]) -> bool {
 }
 
 fn ata_health(h: &Handle, t: Transport) -> io::Result<AtaHealth> {
-    let data = run(h, t, &smart(0xD0, 0, true))?;
+    let data = run(h, t, &smart(0xD0, 0, true))?.data;
     if !checksum_ok(&data) {
         return Err(io::Error::other("SMART data failed its checksum"));
     }
-    let thresholds = run(h, t, &smart(0xD1, 0, true)).ok().filter(|d| checksum_ok(d));
-    let identify = run(h, t, &identify()).ok().and_then(|d| parse_ata_identify(&d));
+    let thresholds = run(h, t, &smart(0xD1, 0, true)).ok().map(|r| r.data).filter(|d| checksum_ok(d));
+    let identify = run(h, t, &identify()).ok().and_then(|reply| parse_ata_identify(&reply.data));
+    let smart_passed = match run(h, t, &smart(0xDA, 0, false)).ok().and_then(|r| r.status_signature) {
+        Some((0x4f, 0xc2)) => Some(true),
+        Some((0xf4, 0x2c)) => Some(false),
+        _ => None,
+    };
+    let endurance_used = if identify.as_ref().is_none_or(|id| id.rotation_rate_rpm.is_none()) {
+        let command =
+            AtaCommand { features: 0, count: 1, lba_low: 4, lba_mid: 7, lba_high: 0, command: 0x2F, data_in: true };
+        run(h, t, &command).ok().and_then(|reply| parse_ata_endurance_page(&reply.data))
+    } else {
+        None
+    };
     Ok(AtaHealth {
+        smart_passed,
+        endurance_used,
         attributes: parse_ata_smart(&data, thresholds.as_ref().map(|t| &t[..])),
         self_test: Some(parse_self_test_status(data[363])),
         identify,

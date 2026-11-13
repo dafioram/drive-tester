@@ -94,6 +94,10 @@ pub struct HealthSection {
     /// Watched counters that rose during the test.
     pub changes: Vec<HealthChange>,
     pub verdict: Option<HealthVerdict>,
+    #[serde(default)]
+    pub score_before: Option<crate::health_score::HealthScore>,
+    #[serde(default)]
+    pub score_after: Option<crate::health_score::HealthScore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

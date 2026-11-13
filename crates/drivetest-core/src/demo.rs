@@ -776,6 +776,8 @@ impl Platform for DemoPlatform {
                 HealthSnapshot::from_ata(
                     HealthSource::AtaSmart,
                     AtaHealth {
+                        endurance_used: None,
+                        smart_passed: Some(true),
                         attributes: vec![
                             attr(1, 200, 200, 51, 0),
                             attr(3, 175, 172, 21, 4_200),

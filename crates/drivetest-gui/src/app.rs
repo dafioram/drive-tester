@@ -766,6 +766,16 @@ impl DriveTestApp {
                 ui.label(format!("· {t} °C"));
             }
         });
+        if let Some(score) = h.health_score(d.media) {
+            ui.collapsing(format!("Custom health score: {}% ({})", score.percent, score.status.label()), |ui| {
+                ui.label(format!("Base {}% ({})", score.base_percent, score.base_source));
+                for reason in score.adjustments {
+                    ui.label(reason);
+                }
+            });
+        } else {
+            ui.weak("Custom health score unavailable");
+        }
         for r in &v.reasons {
             ui.label(format!("• {r}"));
         }

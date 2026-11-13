@@ -23,6 +23,7 @@ pub mod events;
 pub mod freespace;
 pub mod fsinfo;
 pub mod health;
+pub mod health_score;
 pub mod model;
 pub mod platform;
 pub mod policy;

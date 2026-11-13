@@ -35,7 +35,7 @@ type it creates cannot be constructed anywhere else.
   selected files (normally the slow files found by the stale-data check). It goes through the
   file system, never raw sectors, and skips Windows, Program Files, ProgramData, system files,
   the pagefile, files in use, cloud placeholders, encrypted, compressed, sparse and linked files.
-- **Device commands are allow-listed.** Only ATA IDENTIFY and SMART read / self-test, the NVMe
+- **Device commands are allow-listed.** Only ATA IDENTIFY, the ATA endurance statistics page, SMART read / status / self-test, the NVMe
   self-test and log reads, and SD register reads (CMD9, CMD10, ACMD13) can be sent; anything
   else is refused in code.
 - **The app always starts in Read-only mode.** Destructive controls are hidden until Read-write
@@ -45,6 +45,7 @@ type it creates cannot be constructed anywhere else.
 
 **Health**
 - SMART over ATA pass-through (SATA), SMART over SAT for USB-to-SATA enclosures, and the NVMe health log.
+- Custom 0–100% health score with a breakdown of endurance, age and error penalties when the required SMART/NVMe fields are available.
 - Plain-language verdict: Good, Caution or Replace, with reasons and SSD life remaining.
 - Built-in short and extended self-tests: SATA, SATA behind USB bridges that support SAT, and NVMe.
 - SD cards in native slots: identity from the CID register (manufacturer, OEM, product, serial,

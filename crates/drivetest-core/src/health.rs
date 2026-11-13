@@ -254,9 +254,23 @@ pub fn parse_ata_identify(data: &[u8]) -> Option<AtaIdentify> {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AtaHealth {
+    #[serde(default)]
+    pub endurance_used: Option<u8>,
+    #[serde(default)]
+    pub smart_passed: Option<bool>,
     pub attributes: Vec<SmartAttribute>,
     pub self_test: Option<SelfTestStatus>,
     pub identify: Option<AtaIdentify>,
+}
+
+/// ATA Device Statistics page 7, first statistic. Requires supported, valid, normalized data.
+pub fn parse_ata_endurance_page(data: &[u8]) -> Option<u8> {
+    if data.get(2) != Some(&7) {
+        return None;
+    }
+    let entry = u64::from_le_bytes(data.get(8..16)?.try_into().ok()?);
+    let required = (1u64 << 63) | (1u64 << 62) | (1u64 << 61);
+    ((entry & required) == required).then_some(entry as u8)
 }
 
 // ---------------------------------------------------------------- NVMe
@@ -516,6 +530,9 @@ fn nvme_verdict(n: &NvmeHealth) -> HealthVerdict {
 fn ata_verdict(a: &AtaHealth) -> HealthVerdict {
     let raw = |id: u8| a.attributes.iter().find(|x| x.id == id).map(|x| x.raw & 0xFFFF_FFFF).unwrap_or(0);
     let mut v = HealthVerdict { level: VerdictLevel::Good, reasons: Vec::new(), remaining_life_percent: None };
+    if a.smart_passed == Some(false) {
+        v.raise(VerdictLevel::Replace, "Drive reports failing SMART status".into());
+    }
 
     for attr in a.attributes.iter().filter(|x| x.failing_now) {
         v.raise(VerdictLevel::Replace, format!("{} (ID {}) is at or below its failure threshold", attr.name, attr.id));
@@ -787,7 +804,13 @@ mod tests {
         assert!(attrs[3].failing_now); // current 5 <= threshold 10
         let snap = HealthSnapshot::from_ata(
             HealthSource::AtaSmart,
-            AtaHealth { attributes: attrs, self_test: Some(parse_self_test_status(data[363])), identify: None },
+            AtaHealth {
+                endurance_used: None,
+                smart_passed: None,
+                attributes: attrs,
+                self_test: Some(parse_self_test_status(data[363])),
+                identify: None,
+            },
         );
         assert_eq!(snap.temperature_c, Some(0x26));
         let v = snap.verdict();
@@ -850,7 +873,13 @@ mod tests {
         let snap = |d: &[u8]| {
             HealthSnapshot::from_ata(
                 HealthSource::AtaSmart,
-                AtaHealth { attributes: parse_ata_smart(d, Some(&thr)), self_test: None, identify: None },
+                AtaHealth {
+                    endurance_used: None,
+                    smart_passed: None,
+                    attributes: parse_ata_smart(d, Some(&thr)),
+                    self_test: None,
+                    identify: None,
+                },
             )
         };
         let changes = health_changes(&snap(&b), &snap(&a));

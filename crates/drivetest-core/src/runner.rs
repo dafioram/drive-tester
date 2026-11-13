@@ -243,6 +243,7 @@ pub fn run_job(
         send(JobEvent::Temperature { elapsed_s: 0.0, celsius: c });
     }
     let can_sample = before.temperature_c.is_some();
+    report.health.score_before = before.health_score(req.drive.media);
     report.health.before = Some(before.clone());
 
     let mut log: Vec<String> = Vec::new();
@@ -396,6 +397,7 @@ pub fn run_job(
     report.health.changes = health_changes(&before, &after);
     report.health.verdict = Some(if after.is_available() { after.verdict() } else { before.verdict() });
     let identify = after.identify().or(before.identify()).cloned();
+    report.health.score_after = after.health_score(report.drive.media);
     report.health.after = Some(after);
     report.smr = Some(assess_smr(req.drive.media, &req.drive.model, identify.as_ref(), write_probe.as_ref()));
     report.temperatures = temps;
@@ -597,6 +599,9 @@ pub fn findings(r: &Report) -> Vec<String> {
         && v.level != VerdictLevel::Unknown
     {
         f.push(format!("Health: {} — {}", v.level.label(), v.reasons.join("; ")));
+    }
+    if let Some(score) = r.health.score_after.as_ref().or(r.health.score_before.as_ref()) {
+        f.push(format!("Custom health score: {}% ({})", score.percent, score.status.label()));
     }
     if let Some(w) = &r.write_test {
         if let Some(c) = &w.capacity {
