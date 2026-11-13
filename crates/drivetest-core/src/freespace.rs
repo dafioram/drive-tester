@@ -1,8 +1,7 @@
 //! Non-destructive free-space test (in the style of H2testw).
 //!
 //! Fills a mounted volume's free space with signed test files, reads them back
-//! and deletes them. Existing files are never touched. Catches fake-capacity
-//! media and bad flash without wiping the drive.
+//! and deletes them. A counterfeit controller may wrap writes onto existing files.
 
 use std::fs;
 use std::io::{Read, Write};
@@ -60,7 +59,10 @@ pub struct FreeSpaceOutcome {
 
 impl FreeSpaceOutcome {
     pub fn problems_found(&self) -> bool {
-        self.corrupt_units + self.aliased_units > 0 || self.unreadable_bytes > 0 || self.write_error.is_some()
+        self.corrupt_units + self.aliased_units > 0
+            || self.unreadable_bytes > 0
+            || self.write_error.is_some()
+            || !self.cleanup_ok
     }
 }
 
@@ -73,7 +75,7 @@ fn chunk_name(index: u64) -> String {
 }
 
 /// Deletes only the files this test created, then the (now empty) folder.
-/// Anything else that appeared in the folder is left alone.
+/// The count advances only after exclusive creation succeeds.
 fn cleanup(dir: &std::path::Path, files: u64) -> bool {
     let mut ok = true;
     for f in 0..files {
@@ -137,7 +139,7 @@ pub fn run_free_space(
     }
     let file_size = (cfg.file_size / bs).max(1) * bs;
     let file_count = budget.div_ceil(file_size);
-    let mut guard = DirGuard { dir: dir.clone(), files: file_count, armed: true };
+    let mut guard = DirGuard { dir: dir.clone(), files: 0, armed: true };
     let mut out = FreeSpaceOutcome {
         mount: auth.mount().to_string(),
         directory: dir.display().to_string(),
@@ -176,6 +178,7 @@ pub fn run_free_space(
                 break;
             }
         };
+        guard.files += 1;
         let mut file_bytes = 0u64;
         for b in 0..this_size / bs {
             if cancel.load(Ordering::Relaxed) {
@@ -255,7 +258,7 @@ pub fn run_free_space(
     }
 
     // ---- cleanup
-    out.cleanup_ok = cleanup(&dir, file_count);
+    out.cleanup_ok = cleanup(&dir, guard.files);
     guard.armed = !out.cleanup_ok;
     if !out.cleanup_ok {
         batcher.log(format!("Could not delete {}; please delete it manually.", dir.display()));

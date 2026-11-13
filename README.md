@@ -63,7 +63,7 @@ type it creates cannot be constructed anywhere else.
 - SMART before and after every test; counters that rise during the test are flagged.
 
 **Write tests** (Read-write mode, never on the system disk)
-- *Free-space verify* (non-destructive): fills free space with self-describing test files, verifies, deletes them.
+- *Free-space verify*: writes and verifies temporary files in available space, then removes them. A fake-capacity controller may overwrite existing files when it wraps writes. Use an empty volume when checking suspected media.
 - *Fake-capacity quick probe* (destructive): writes and verifies sampled positions, estimates real capacity.
 - *Full write + verify* (destructive): every block; finds bad sectors, fake capacity and the SSD write-cache cliff.
 - *SMR write test* (destructive): sustained random writes; a drive-managed SMR disk collapses once its cache fills.

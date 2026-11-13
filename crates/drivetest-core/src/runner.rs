@@ -652,6 +652,11 @@ pub fn findings(r: &Report) -> Vec<String> {
         }
     }
     if let Some(fs) = &r.free_space
+        && !fs.cleanup_ok
+    {
+        f.push(format!("Temporary test files could not be fully cleaned up at {}.", fs.directory));
+    }
+    if let Some(fs) = &r.free_space
         && let Some(c) = &fs.capacity
     {
         f.push(c.summary.clone());

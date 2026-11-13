@@ -941,6 +941,8 @@ impl DriveTestApp {
     fn write_tab(&mut self, ui: &mut egui::Ui, d: &DriveInfo) {
         let policy = Policy::new(self.mode);
         let busy = self.jobs.contains_key(&d.number);
+        ui.label("Free-space verification writes temporary files. On fake-capacity media, those writes can damage existing files.");
+
         if d.is_protected() {
             ui.colored_label(RED, "Write tests are blocked on this drive.");
             ui.label(d.role.describe());
