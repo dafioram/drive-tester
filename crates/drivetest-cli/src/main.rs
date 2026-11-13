@@ -134,6 +134,9 @@ enum Command {
         /// Remap: take bad sectors from a scan report instead of scanning again.
         #[arg(long)]
         from_report: Option<PathBuf>,
+        /// Required for remap. A zero write can destroy recoverable data.
+        #[arg(long)]
+        allow_zero_unreadable: bool,
         #[command(flatten)]
         report: ReportArgs,
     },
@@ -340,6 +343,7 @@ fn main() -> ExitCode {
             smr_minutes,
             slower_than_ms,
             from_report,
+            allow_zero_unreadable,
             report,
         } => {
             let slower = slower_than_ms.map(|ms| (ms * 1000.0) as u32);
@@ -349,6 +353,12 @@ fn main() -> ExitCode {
                 WriteKindArg::Smr => WriteTestKind::SmrProbe { max_gib: smr_gib, max_minutes: smr_minutes },
                 WriteKindArg::Refresh => WriteTestKind::BlockRefresh { slower_than_us: slower },
                 WriteKindArg::Remap => {
+                    if !allow_zero_unreadable {
+                        eprintln!(
+                            "Remap can overwrite potentially recoverable data. Pass --allow-zero-unreadable to confirm."
+                        );
+                        return ExitCode::from(EXIT_REFUSED);
+                    }
                     let lbas = match &from_report {
                         None => Vec::new(),
                         Some(p) => match load_report_for(&*platform, disk, p, None) {

@@ -409,7 +409,7 @@ impl DriveTestApp {
             ui.colored_label(ORANGE, RichText::new("Keeps data, but back it up first.").strong());
             ui.label("A failing drive can lose more data while it is being rewritten.");
             if matches!(kind, WriteTestKind::Remap { .. }) {
-                ui.label("Unreadable sectors are overwritten with zeros; their contents are already lost.");
+                ui.label("Confirmed unreadable sectors will be overwritten with zeros, destroying potentially recoverable data.");
             }
             ui.label(format!("{} · serial {} · {}", d.title(), d.serial, format_bytes(d.size_bytes)));
             for v in &d.volumes {
@@ -422,7 +422,12 @@ impl DriveTestApp {
                 ui.label("Type the serial number to enable Start:");
                 ui.text_edit_singleline(&mut f.typed_serial);
             });
-            ui.checkbox(&mut f.understood, "I have a backup and understand the volumes will be dismounted");
+            let confirmation = if matches!(kind, WriteTestKind::Remap { .. }) {
+                "I understand that this can overwrite recoverable data"
+            } else {
+                "I have a backup and understand the volumes will be dismounted"
+            };
+            ui.checkbox(&mut f.understood, confirmation);
         });
         let check = Policy::new(self.mode).check(d, Tier::Destructive);
         let ready = check.is_ok() && d.serial_matches(&f.typed_serial) && f.understood;
@@ -508,7 +513,7 @@ pub fn report_extras(ui: &mut egui::Ui, r: &Report) {
             rep.unreadable_blocks
         ));
         if !rep.remapped_sectors.is_empty() {
-            ui.colored_label(GREEN, format!("Reallocated: {} sectors", rep.remapped_sectors.len()));
+            ui.colored_label(GREEN, format!("Zeroed and verified: {} sectors", rep.remapped_sectors.len()));
         }
         if !rep.still_bad_sectors.is_empty() {
             ui.colored_label(RED, format!("Still unreadable: {} sectors", rep.still_bad_sectors.len()));

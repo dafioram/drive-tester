@@ -94,7 +94,12 @@ impl RawReader for WinDisk {
             let ok =
                 unsafe { ReadFile(self.handle.raw(), buf[done..].as_mut_ptr(), want, &mut got, std::ptr::null_mut()) };
             if ok == 0 {
-                return Err(io::Error::last_os_error());
+                let error = io::Error::last_os_error();
+                // CRC and generic device errors can also come from the transport.
+                if error.raw_os_error() == Some(windows_sys::Win32::Foundation::ERROR_SECTOR_NOT_FOUND as i32) {
+                    return Err(io::Error::other(drivetest_core::platform::MediaReadError(error)));
+                }
+                return Err(error);
             }
             if got == 0 {
                 return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short read"));

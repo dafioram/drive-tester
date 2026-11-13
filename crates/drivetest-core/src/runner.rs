@@ -350,6 +350,7 @@ pub fn run_job(
                 report.test.completed = out.completed;
                 report.test.cancelled = out.cancelled;
                 write_probe = out.smr.clone();
+                report.test.error = out.repair.as_ref().and_then(|repair| repair.aborted.clone());
                 report.write_test = Some(build_write_report(out));
             }
         }
@@ -620,7 +621,7 @@ pub fn findings(r: &Report) -> Vec<String> {
         }
         if !rep.remapped_sectors.is_empty() {
             f.push(format!(
-                "{} unreadable sectors were overwritten and now read correctly (reallocated).",
+                "{} unreadable sectors were overwritten and now return the replacement bytes.",
                 rep.remapped_sectors.len()
             ));
         }

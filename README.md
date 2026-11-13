@@ -85,8 +85,7 @@ type it creates cannot be constructed anywhere else.
   data volume; before / after read speeds are reported.
 - *Block refresh* (raw, keeps data): rewrites every block that holds data, or only blocks that
   read slower than a threshold; all-zero (trimmed) blocks are skipped.
-- *Weak-sector remap* (raw, keeps readable data): overwrites unreadable sectors so the drive
-  reallocates them, using the bad sectors from the last scan or a fresh scan. Scan and
+- *Weak-sector remap* (raw, keeps readable data): overwrites confirmed unreadable sectors with zeros and checks whether the replacement bytes read back, using the bad sectors from the last scan or a fresh scan. Scan and
   stale-check reports are only accepted for the exact drive (serial, capacity, sector size) and
   volume they were made for.
 
@@ -147,7 +146,7 @@ drivetest write-test 2 --kind probe --read-write            Prompts for the seri
 drivetest write-test 2 --kind full  --read-write --confirm-serial ABC123
 drivetest write-test 2 --kind smr   --read-write --smr-gib 40 --smr-minutes 20
 drivetest write-test 2 --kind refresh --read-write [--slower-than-ms 50]   Block refresh (keeps data)
-drivetest write-test 2 --kind remap   --read-write [--from-report scan.json] Sector remap
+drivetest write-test 2 --kind remap   --read-write --allow-zero-unreadable [--from-report scan.json] Sector remap
 drivetest stale-check 0 --volume C:\                         Read-only
 drivetest refresh-files 0 --volume C:\ --read-write --from-report stale.json --system-disk-opt-in
 drivetest refresh-files 2 --volume E:\ --read-write --whole-volume

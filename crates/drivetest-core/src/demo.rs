@@ -296,7 +296,9 @@ impl RawReader for DemoDisk {
             let secs = self.read_secs(offset, len, false) + 0.35;
             self.last_read_end = offset + len;
             self.finish(secs);
-            return Err(io::Error::other("simulated media error (uncorrectable read)"));
+            return Err(io::Error::other(crate::platform::MediaReadError(io::Error::other(
+                "simulated uncorrectable read",
+            ))));
         }
         let mut zero_only = true;
         {

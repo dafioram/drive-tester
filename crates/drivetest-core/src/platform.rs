@@ -58,6 +58,15 @@ pub struct SectorFile {
     pub location: String,
 }
 
+/// A backend-confirmed sector read error. Generic I/O failures carry their original error.
+#[derive(Debug, thiserror::Error)]
+#[error("unreadable sector: {0}")]
+pub struct MediaReadError(pub io::Error);
+
+pub fn is_media_read_error(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|cause| cause.is::<MediaReadError>())
+}
+
 /// Read access to a raw block device.
 pub trait RawReader: Send {
     fn size_bytes(&self) -> u64;

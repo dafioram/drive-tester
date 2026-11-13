@@ -38,7 +38,9 @@ pub struct RepairSummary {
     pub unreadable_blocks: u64,
     /// Blocks or sectors that still read back wrong after a retry.
     pub verify_failures: u64,
-    /// Unreadable sectors that read fine after being overwritten (reallocated).
+    #[serde(default)]
+    pub aborted: Option<String>,
+    /// Unreadable sectors that read back the replacement bytes.
     pub remapped_sectors: Vec<u64>,
     /// Sectors that stayed unreadable even after being overwritten.
     pub still_bad_sectors: Vec<u64>,
@@ -132,6 +134,17 @@ pub fn run_block_refresh(
     out
 }
 
+fn read_for_remap(dev: &mut dyn RawWriter, offset: u64, buf: &mut [u8]) -> std::io::Result<bool> {
+    for _ in 0..2 {
+        match dev.read_at(offset, buf) {
+            Ok(()) => return Ok(true),
+            Err(e) if crate::platform::is_media_read_error(&e) => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(false)
+}
+
 pub fn run_remap(
     dev: &mut dyn RawWriter,
     cfg: &WriteTestConfig,
@@ -162,7 +175,7 @@ pub fn run_remap(
         let mut scratch = AlignedBuf::new(bs as usize);
         let n = out.write_map.total_blocks();
         batcher.pass("Scanning for weak sectors", n, n, bs);
-        for index in 0..n {
+        'scan: for index in 0..n {
             if cancel.load(Ordering::Relaxed) {
                 out.cancelled = true;
                 break;
@@ -172,12 +185,25 @@ pub fn run_remap(
             sum.blocks_checked += 1;
             let (r, lat) = timed_read(dev, offset, &mut buf[..len]);
             let status = match r {
+                Err(error) if !crate::platform::is_media_read_error(&error) => {
+                    sum.aborted = Some(format!("Stopped at byte {offset}: {error}"));
+                    break;
+                }
                 Err(_) => {
                     sum.unreadable_blocks += 1;
                     let mut pos = offset;
                     while pos < offset + len as u64 {
-                        if dev.read_at(pos, &mut sector_buf).is_err() && dev.read_at(pos, &mut sector_buf).is_err() {
-                            candidates.push(pos / sector);
+                        if cancel.load(Ordering::Relaxed) {
+                            out.cancelled = true;
+                            break 'scan;
+                        }
+                        match read_for_remap(dev, pos, &mut sector_buf) {
+                            Ok(false) => candidates.push(pos / sector),
+                            Ok(true) => {}
+                            Err(error) => {
+                                sum.aborted = Some(format!("Stopped at byte {pos}: {error}"));
+                                break 'scan;
+                            }
                         }
                         pos += sector;
                     }
@@ -203,7 +229,7 @@ pub fn run_remap(
     candidates.sort_unstable();
     candidates.dedup();
 
-    if !out.cancelled && !candidates.is_empty() {
+    if !out.cancelled && sum.aborted.is_none() && !candidates.is_empty() {
         let mut vmap = BlockMap::new(size, bs);
         batcher.pass("Remapping sectors", candidates.len() as u64, vmap.total_blocks(), bs);
         batcher.log(format!("{} sectors to treat", candidates.len()));
@@ -214,7 +240,13 @@ pub fn run_remap(
                 break;
             }
             let offset = lba * sector;
-            let readable = dev.read_at(offset, &mut sector_buf).is_ok() || dev.read_at(offset, &mut sector_buf).is_ok();
+            let readable = match read_for_remap(dev, offset, &mut sector_buf) {
+                Ok(readable) => readable,
+                Err(error) => {
+                    sum.aborted = Some(format!("Stopped at LBA {lba}: {error}"));
+                    break;
+                }
+            };
             let status = if readable {
                 // Still readable: keep its data, just rewrite it.
                 let data = sector_buf.to_vec();
@@ -240,13 +272,16 @@ pub fn run_remap(
             batcher.push(Some(BlockUpdate { index, latency_us: 0, status }), sector);
         }
         out.verify_map = Some(vmap);
-    } else if candidates.is_empty() && !out.cancelled {
+    } else if candidates.is_empty() && !out.cancelled && sum.aborted.is_none() {
         batcher.log("No unreadable sectors found; nothing to remap.");
     }
     batcher.flush();
     out.unreadable_units = sum.still_bad_sectors.len() as u64;
+    if let Some(error) = &sum.aborted {
+        batcher.log(error);
+    }
+    out.completed = !out.cancelled && sum.aborted.is_none();
     out.repair = Some(sum);
-    out.completed = !out.cancelled;
     out.elapsed = start.elapsed();
     out
 }
