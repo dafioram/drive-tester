@@ -172,12 +172,13 @@ pub fn run_remap(
     let mut out = WriteTestOutcome::empty(cfg.kind.clone(), size, bs);
     let mut sum = RepairSummary::default();
     let mut batcher = Batcher::new(sink);
-    // Drop listed sectors that do not fit this drive (including overflowing values).
-    let mut candidates: Vec<u64> = lbas
-        .iter()
-        .copied()
-        .filter(|&l| l.checked_add(1).and_then(|e| e.checked_mul(sector)).is_some_and(|end| end <= size))
-        .collect();
+    // A supplied list never falls back to a whole-disk search.
+    if lbas.iter().any(|&lba| lba >= size / sector) {
+        sum.aborted = Some("The remap list contains an address outside the selected device.".into());
+        out.repair = Some(sum);
+        return out;
+    }
+    let mut candidates = lbas.to_vec();
     let mut sector_buf = AlignedBuf::new(sector as usize);
     let mut sector_scratch = AlignedBuf::new(sector as usize);
 
@@ -265,6 +266,7 @@ pub fn run_remap(
             let status = if readable {
                 // Still readable: keep its data, just rewrite it.
                 if write_verified(dev, offset, &sector_buf, &mut sector_scratch, &mut out.flush_error) {
+                    out.bytes_written += sector;
                     sum.refreshed_sectors.push(lba);
                     BlockStatus::Ok
                 } else {
