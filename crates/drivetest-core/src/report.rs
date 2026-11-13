@@ -141,6 +141,8 @@ pub struct ScanReport {
     pub bad_sectors: Vec<u64>,
     pub bad_sector_files: Vec<SectorFile>,
     pub unresolved_blocks: Vec<u64>,
+    #[serde(default)]
+    pub unresolved_block_count: u64,
     pub weak_regions: Vec<WeakRegion>,
     pub speed_curve_mb_s: Vec<f64>,
     pub blocks: BlockMap,

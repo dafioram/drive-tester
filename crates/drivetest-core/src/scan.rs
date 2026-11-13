@@ -238,6 +238,7 @@ pub struct ScanOutcome {
     pub bad_sectors: Vec<u64>,
     /// Blocks where pinpointing stopped early (long runs of failures).
     pub unresolved_blocks: Vec<u64>,
+    pub unresolved_block_count: u64,
     pub completed: bool,
     pub cancelled: bool,
     pub elapsed: Duration,
@@ -313,6 +314,13 @@ pub fn run_read_scan(
     let mut sector_buf = AlignedBuf::new(sector as usize);
     let mut bad_sectors = Vec::new();
     let mut unresolved_blocks = Vec::new();
+    let mut unresolved_block_count = 0;
+    let mut mark_unresolved = |index| {
+        unresolved_block_count += 1;
+        if unresolved_blocks.len() < MAX_BAD_SECTORS {
+            unresolved_blocks.push(index);
+        }
+    };
     let mut bytes_read = 0u64;
     let mut cancelled = false;
     let mut errors_logged = 0;
@@ -348,7 +356,7 @@ pub fn run_read_scan(
             && !crate::platform::is_media_read_error(e)
         {
             error = Some(format!("Scan stopped at byte {offset}: {e}"));
-            unresolved_blocks.push(index);
+            mark_unresolved(index);
             break;
         }
         let status = match result {
@@ -365,16 +373,16 @@ pub fn run_read_scan(
                 if cfg.pinpoint_errors {
                     match pinpoint(dev, offset, len as u64, sector, &mut sector_buf, &mut bad_sectors, cancel) {
                         Ok(true) => {}
-                        Ok(false) => unresolved_blocks.push(index),
+                        Ok(false) => mark_unresolved(index),
                         Err(e) => {
-                            unresolved_blocks.push(index);
+                            mark_unresolved(index);
                             if !cancel.load(Ordering::Relaxed) {
                                 error = Some(format!("Pinpointing stopped in block at byte {offset}: {e}"));
                             }
                         }
                     }
                 } else {
-                    unresolved_blocks.push(index);
+                    mark_unresolved(index);
                 }
                 BlockStatus::Error
             }
@@ -450,6 +458,7 @@ pub fn run_read_scan(
         cancelled,
         bad_sectors,
         unresolved_blocks,
+        unresolved_block_count,
         elapsed: start.elapsed(),
         bytes_read,
         map,

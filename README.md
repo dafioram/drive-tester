@@ -80,7 +80,7 @@ type it creates cannot be constructed anywhere else.
 - *SSD file refresh*: rewrites files in place with their own bytes, verifies each chunk with an
   uncached read-back, and restores timestamps and attributes. Every target must be a path inside
   the chosen volume, and each opened file's real location (links, junctions, short names
-  resolved) is checked again before writing. Tools that watch the NTFS change journal still see
+  resolved) is checked again before writing. Restoration failures are reported. Tools that watch the NTFS change journal still see
   the files as rewritten; hard-linked files are rewritten once per link; a program writing
   through a memory-mapped view without an open handle is not blocked. Targeted (the slow files), a folder, or a whole
   data volume; before / after read speeds are reported.
@@ -164,9 +164,9 @@ Exit codes: `0` passed, `1` problems found, `2` incomplete, unsupported or error
 ## Reports
 
 Each run writes `diskN-<test>-<timestamp>.json` containing the drive identity, test settings,
-health before and after (with any counters that rose), findings in plain language, and the raw
-data: per-block latency and status, bad sectors with their files, speed curves, write-test
-verdicts and temperatures. `schema` is bumped on incompatible changes.
+health before and after (with any counters that rose), findings in plain language, along with scan coverage, latency summaries, a surface map, bad sectors and best-effort file mapping,
+speed curves, write-test verdicts and temperatures. The optional dense scan export records per-block
+latency and status. `schema` is bumped on incompatible changes.
 
 ## Project layout
 

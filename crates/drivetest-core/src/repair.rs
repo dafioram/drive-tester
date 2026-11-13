@@ -263,6 +263,10 @@ pub fn run_remap(
                     break;
                 }
             };
+            if cancel.load(Ordering::Relaxed) {
+                out.cancelled = true;
+                break;
+            }
             let status = if readable {
                 // Still readable: keep its data, just rewrite it.
                 if write_verified(dev, offset, &sector_buf, &mut sector_scratch, &mut out.flush_error) {

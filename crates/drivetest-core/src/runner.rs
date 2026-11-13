@@ -559,6 +559,7 @@ fn build_scan_report(
         bad_sectors: outcome.bad_sectors,
         bad_sector_files,
         unresolved_blocks: outcome.unresolved_blocks,
+        unresolved_block_count: outcome.unresolved_block_count,
         weak_regions: weak,
         speed_curve_mb_s: curve,
         blocks: outcome.map,
@@ -740,8 +741,14 @@ pub fn findings(r: &Report) -> Vec<String> {
         if s.recovered_blocks > 0 {
             f.push(format!("{} blocks read successfully after a retry.", s.recovered_blocks));
         }
-        if !s.unresolved_blocks.is_empty() {
-            f.push(format!("{} blocks could not be fully diagnosed.", s.unresolved_blocks.len()));
+        let unresolved = s.unresolved_block_count.max(s.unresolved_blocks.len() as u64);
+        if unresolved > 0 {
+            f.push(format!("{unresolved} blocks could not be fully diagnosed."));
+        }
+        if unresolved > s.unresolved_blocks.len() as u64
+            || s.slow_blocks > s.slow_offsets.len() as u64 && s.scan_config.is_some()
+        {
+            f.push("The report retained the first 100,000 addresses in each capped list.".into());
         }
         if !s.bad_sectors.is_empty() {
             f.push(format!("{} unreadable sectors found.", s.bad_sectors.len()));
