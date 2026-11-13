@@ -96,7 +96,7 @@ pub trait Platform: Send + Sync {
     fn enumerate(&self) -> Result<Vec<DriveInfo>, PlatformError>;
 
     /// Opens a drive read-only.
-    fn open_read(&self, disk: u32) -> io::Result<Box<dyn RawReader>>;
+    fn open_read(&self, drive: &DriveInfo) -> io::Result<Box<dyn RawReader>>;
 
     /// Opens a drive for raw writes. Requires a policy-issued authorization.
     fn open_write(&self, auth: &WriteAuthorization) -> io::Result<Box<dyn RawWriter>>;
@@ -188,7 +188,12 @@ pub trait Platform: Send + Sync {
     }
 
     /// Traces bad sectors to the files that occupy them (NTFS only).
-    fn map_sectors_to_files(&self, _disk: u32, _lbas: &[u64]) -> Result<Vec<SectorFile>, PlatformError> {
+    fn map_sectors_to_files(
+        &self,
+        _drive: &DriveInfo,
+        _sector: u32,
+        _lbas: &[u64],
+    ) -> Result<Vec<SectorFile>, PlatformError> {
         Err(PlatformError::Unsupported("file mapping is not available on this platform".into()))
     }
 

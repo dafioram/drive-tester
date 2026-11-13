@@ -68,7 +68,10 @@ impl WinPlatform {
         if normalize_serial(&d.serial) != normalize_serial(auth.serial()) || normalize_serial(&d.serial).is_empty() {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused: the drive's serial number changed"));
         }
-        if d.size_bytes != auth.size_bytes() {
+        if d.size_bytes != auth.size_bytes()
+            || d.logical_sector_size != auth.logical_sector_size()
+            || d.device_ids != auth.device_ids()
+        {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "refused: the drive's capacity changed"));
         }
         if d.write_protected {
@@ -174,13 +177,23 @@ impl Platform for WinPlatform {
         Ok(drives)
     }
 
-    fn open_read(&self, disk: u32) -> io::Result<Box<dyn RawReader>> {
-        Ok(Box::new(WinDisk::open_read(disk)?))
+    fn open_read(&self, drive: &DriveInfo) -> io::Result<Box<dyn RawReader>> {
+        let opened = WinDisk::open_read(drive)?;
+        if !drive.device_ids.is_empty() && devtree::device_id_chains().get(&drive.number) != Some(&drive.device_ids) {
+            return Err(io::Error::other("The selected device instance changed"));
+        }
+        Ok(Box::new(opened))
     }
 
     fn open_write(&self, auth: &WriteAuthorization) -> io::Result<Box<dyn RawWriter>> {
         self.recheck(auth)?;
-        Ok(Box::new(WinDisk::open_write_verified(auth)?))
+        let opened = WinDisk::open_write_verified(auth)?;
+        if !auth.device_ids().is_empty()
+            && devtree::device_id_chains().get(&auth.disk_number()).map(Vec::as_slice) != Some(auth.device_ids())
+        {
+            return Err(io::Error::other("The selected device instance changed"));
+        }
+        Ok(Box::new(opened))
     }
 
     fn lock_volumes(&self, auth: &WriteAuthorization) -> io::Result<Box<dyn Any + Send>> {
@@ -293,13 +306,17 @@ impl Platform for WinPlatform {
         if unsafe { SetFileAttributesW(w.as_ptr(), a) } == 0 { Err(io::Error::last_os_error()) } else { Ok(()) }
     }
 
-    fn map_sectors_to_files(&self, disk: u32, lbas: &[u64]) -> Result<Vec<SectorFile>, PlatformError> {
-        let sector = open(&disk_path(disk), GENERIC_READ, 0)
-            .ok()
-            .and_then(|h| enumerate::alignment(&h).map(|(l, _)| u64::from(l)))
-            .unwrap_or(512);
+    fn map_sectors_to_files(
+        &self,
+        drive: &DriveInfo,
+        sector: u32,
+        lbas: &[u64],
+    ) -> Result<Vec<SectorFile>, PlatformError> {
+        if !self.fresh(drive.number)?.same_device(drive) {
+            return Err(PlatformError::Other("Device changed before NTFS lookup".into()));
+        }
         let volumes = list_volumes().map_err(PlatformError::Io)?;
-        Ok(filemap::map(disk, lbas, sector, &volumes))
+        Ok(filemap::map(drive.number, lbas, u64::from(sector), &volumes))
     }
 
     fn is_elevated(&self) -> bool {

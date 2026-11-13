@@ -184,6 +184,22 @@ pub struct DriveInfo {
 }
 
 impl DriveInfo {
+    /// Compare the attributes that identify a device independently of its disk number.
+    pub fn same_device(&self, other: &Self) -> bool {
+        self.bus == other.bus
+            && self.model == other.model
+            && normalize_serial(&self.serial) == normalize_serial(&other.serial)
+            && self.size_bytes == other.size_bytes
+            && self.logical_sector_size == other.logical_sector_size
+            && self.device_ids == other.device_ids
+    }
+
+    /// A saved set of addresses requires a usable device identity.
+    pub fn matches_report_device(&self, other: &Self) -> bool {
+        let serial = normalize_serial(&self.serial);
+        !serial.is_empty() && serial.bytes().any(|byte| byte != b'0') && self.same_device(other)
+    }
+
     /// Human name: model, falling back to vendor or disk number.
     pub fn title(&self) -> String {
         let model = self.model.trim();

@@ -2,7 +2,7 @@
 
 use std::io;
 
-use drivetest_core::model::normalize_serial;
+use drivetest_core::model::{DriveInfo, normalize_serial};
 use drivetest_core::platform::{RawReader, RawWriter};
 use drivetest_core::policy::WriteAuthorization;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE};
@@ -23,8 +23,19 @@ pub struct WinDisk {
 
 impl WinDisk {
     /// Opens a disk read-only.
-    pub(crate) fn open_read(disk: u32) -> io::Result<Self> {
-        Self::open(disk, GENERIC_READ)
+    pub(crate) fn open_read(expected: &DriveInfo) -> io::Result<Self> {
+        let disk = Self::open(expected.number, GENERIC_READ)?;
+        let desc = enumerate::descriptor(&disk.handle)?;
+        if enumerate::device_number(&disk.handle)? != expected.number
+            || desc.product != expected.model
+            || desc.bus != expected.bus
+            || normalize_serial(&desc.serial) != normalize_serial(&expected.serial)
+            || disk.size != expected.size_bytes
+            || disk.sector != expected.logical_sector_size
+        {
+            return Err(io::Error::other("The opened disk differs from the selected device"));
+        }
+        Ok(disk)
     }
 
     /// Opens a disk for writing, then verifies the *opened handle* is the
@@ -40,7 +51,7 @@ impl WinDisk {
         if normalize_serial(&serial).is_empty() || normalize_serial(&serial) != normalize_serial(auth.serial()) {
             return Err(refuse("the opened device has a different serial number"));
         }
-        if disk.size != auth.size_bytes() {
+        if disk.size != auth.size_bytes() || disk.sector != auth.logical_sector_size() {
             return Err(refuse("the opened device has a different capacity"));
         }
         Ok(disk)

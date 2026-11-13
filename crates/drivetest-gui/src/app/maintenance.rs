@@ -214,7 +214,7 @@ impl DriveTestApp {
         let stale = self
             .stale
             .get(&d.number)
-            .filter(|(serial, s)| d.serial_matches(serial) && Some(&s.mount) == mount.as_ref())
+            .filter(|(drive, s)| d.matches_report_device(drive) && Some(&s.mount) == mount.as_ref())
             .map(|(_, s)| s.clone());
         if let Some(st) = &stale {
             ui.add_space(4.0);
@@ -370,7 +370,7 @@ impl DriveTestApp {
         let bad = self
             .last_bad
             .get(&d.number)
-            .filter(|(serial, _)| d.serial_matches(serial))
+            .filter(|(drive, _)| d.matches_report_device(drive))
             .map(|(_, b)| b.clone())
             .unwrap_or_default();
         let f = &mut self.maint_form;

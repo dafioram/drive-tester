@@ -138,8 +138,8 @@ pub struct DriveTestApp {
     tab: Tab,
     health: HashMap<u32, HealthSnapshot>,
     health_pending: HashSet<u32>,
-    health_tx: Sender<(u32, HealthSnapshot)>,
-    health_rx: Receiver<(u32, HealthSnapshot)>,
+    health_tx: Sender<(DriveInfo, HealthSnapshot)>,
+    health_rx: Receiver<(DriveInfo, HealthSnapshot)>,
     jobs: HashMap<u32, RunningJob>,
     views: HashMap<u32, LiveView>,
     reports: HashMap<u32, LastReport>,
@@ -150,9 +150,9 @@ pub struct DriveTestApp {
     speed_form: maintenance::SpeedForm,
     /// Latest stale-data check per drive (feeds the targeted refresh).
     /// Keyed by disk number, with the drive serial it was made for.
-    stale: HashMap<u32, (String, StaleOutcome)>,
+    stale: HashMap<u32, (DriveInfo, StaleOutcome)>,
     /// Bad sectors from the latest read scan per drive (feeds remap).
-    last_bad: HashMap<u32, (String, Vec<u64>)>,
+    last_bad: HashMap<u32, (DriveInfo, Vec<u64>)>,
     report_dir: PathBuf,
 }
 
@@ -219,6 +219,23 @@ impl DriveTestApp {
         self.last_refresh = Instant::now();
         match self.platform.enumerate() {
             Ok(drives) => {
+                for old in &self.drives {
+                    let disk = old.number;
+                    if !drives.iter().any(|new| new.number == disk && old.same_device(new)) {
+                        self.health.remove(&disk);
+                        self.reports.remove(&disk);
+                        self.views.remove(&disk);
+                        self.errors.remove(&disk);
+                        self.last_bad.remove(&disk);
+                        self.stale.remove(&disk);
+                        if self.selected == Some(disk) {
+                            self.selected = None;
+                            self.write_form.typed_serial.clear();
+                            self.write_form.understood = false;
+                            self.maint_form = maintenance::MaintForm::default();
+                        }
+                    }
+                }
                 self.drives = drives;
                 self.enum_error = None;
             }
@@ -257,6 +274,7 @@ impl DriveTestApp {
     }
 
     fn request_health(&mut self, disk: u32, ctx: Option<&egui::Context>) {
+        let Some(drive) = self.drive(disk).cloned() else { return };
         if !self.health_pending.insert(disk) {
             return;
         }
@@ -265,7 +283,7 @@ impl DriveTestApp {
         let ctx = ctx.cloned();
         std::thread::spawn(move || {
             let snap = platform.read_health(disk).unwrap_or_else(|e| HealthSnapshot::unavailable(e.to_string()));
-            let _ = tx.send((disk, snap));
+            let _ = tx.send((drive, snap));
             if let Some(c) = ctx {
                 c.request_repaint();
             }
@@ -296,9 +314,14 @@ impl DriveTestApp {
 
     /// Moves events from worker threads into the views.
     fn pump(&mut self) {
-        while let Ok((disk, snap)) = self.health_rx.try_recv() {
+        while let Ok((drive, snap)) = self.health_rx.try_recv() {
+            let disk = drive.number;
             self.health_pending.remove(&disk);
-            self.health.insert(disk, snap);
+            if self.drive(disk).is_some_and(|current| current.same_device(&drive)) {
+                self.health.insert(disk, snap);
+            } else {
+                self.request_health(disk, None);
+            }
         }
         let mut done: Vec<(u32, JobOutcome)> = Vec::new();
         for (disk, job) in &self.jobs {
@@ -324,14 +347,17 @@ impl DriveTestApp {
             self.jobs.remove(&disk);
             match outcome {
                 Ok((report, saved_to, save_error)) => {
+                    if !self.drive(disk).is_some_and(|d| d.same_device(&report.drive)) {
+                        continue;
+                    }
                     let view = self.views.entry(disk).or_default();
                     view.phase = if report.test.cancelled { "Stopped".into() } else { "Finished".into() };
                     if let Some(s) = &report.scan {
                         view.exact = Some(s.latency.clone());
-                        self.last_bad.insert(disk, (report.drive.serial.clone(), s.bad_sectors.clone()));
+                        self.last_bad.insert(disk, (report.drive.clone(), s.bad_sectors.clone()));
                     }
                     if let Some(st) = &report.stale {
-                        self.stale.insert(disk, (report.drive.serial.clone(), st.clone()));
+                        self.stale.insert(disk, (report.drive.clone(), st.clone()));
                     }
                     if let Some(after) = report.health.after.clone()
                         && after.is_available()

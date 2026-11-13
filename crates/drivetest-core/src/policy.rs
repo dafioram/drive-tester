@@ -107,6 +107,8 @@ pub struct WriteAuthorization {
     disk: u32,
     serial: String,
     size_bytes: u64,
+    logical_sector_size: u32,
+    device_ids: Vec<String>,
     _sealed: Sealed,
 }
 
@@ -118,6 +120,14 @@ impl WriteAuthorization {
     /// Serial the user confirmed; platforms re-check it on the opened handle.
     pub fn serial(&self) -> &str {
         &self.serial
+    }
+
+    pub fn device_ids(&self) -> &[String] {
+        &self.device_ids
+    }
+
+    pub fn logical_sector_size(&self) -> u32 {
+        self.logical_sector_size
     }
 
     /// Capacity at confirmation time; platforms re-check it on the opened handle.
@@ -245,7 +255,7 @@ impl Policy {
 
     /// Opens a drive read-only. Allowed on every drive.
     pub fn open_read(&self, platform: &dyn Platform, drive: &DriveInfo) -> Result<Box<dyn RawReader>, PolicyError> {
-        platform.open_read(drive.number).map_err(|e| PolicyError::Open(e.to_string()))
+        platform.open_read(drive).map_err(|e| PolicyError::Open(e.to_string()))
     }
 
     /// Approves a free-space test on one of the drive's mounted volumes.
@@ -344,11 +354,8 @@ impl Policy {
             .into_iter()
             .find(|d| d.number == drive.number)
             .ok_or_else(|| PolicyError::DriveChanged("the drive is no longer present".into()))?;
-        if normalize_serial(&fresh.serial) != normalize_serial(&drive.serial) {
-            return Err(PolicyError::DriveChanged("a different drive is now at this position".into()));
-        }
-        if fresh.size_bytes != drive.size_bytes {
-            return Err(PolicyError::DriveChanged("the reported capacity changed".into()));
+        if !fresh.same_device(drive) {
+            return Err(PolicyError::DriveChanged("device identity or geometry changed".into()));
         }
         Ok(fresh)
     }
@@ -385,6 +392,8 @@ impl Policy {
             disk: fresh.number,
             serial: fresh.serial.clone(),
             size_bytes: fresh.size_bytes,
+            logical_sector_size: fresh.logical_sector_size,
+            device_ids: fresh.device_ids.clone(),
             _sealed: Sealed,
         };
         let locks = platform.lock_volumes(&auth).map_err(|e| PolicyError::LockFailed(e.to_string()))?;

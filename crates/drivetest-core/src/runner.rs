@@ -292,13 +292,14 @@ pub fn run_job(
                     return Err(failed("The scan range contains no bytes on this drive."));
                 }
                 let outcome = run_read_scan(&mut *reader, cfg, cancel, &mut sink);
+                let sector = reader.logical_sector_size();
                 drop(reader);
                 report.test.completed = outcome.completed;
                 report.test.cancelled = outcome.cancelled;
                 if !outcome.bad_sectors.is_empty() {
                     send(JobEvent::Phase("Mapping bad sectors to files".into()));
                 }
-                report.scan = Some(build_scan_report(platform, &req.drive, cfg, outcome, &mut post_log));
+                report.scan = Some(build_scan_report(platform, &req.drive, sector, cfg, outcome, &mut post_log));
             }
             JobKind::FreeSpaceVerify { mount, config } => {
                 let auth = policy.authorize_free_space(platform, &req.drive, mount).map_err(refused)?;
@@ -463,6 +464,7 @@ fn run_self_test(
 fn build_scan_report(
     platform: &dyn Platform,
     drive: &DriveInfo,
+    sector: u32,
     cfg: &ScanConfig,
     outcome: ScanOutcome,
     log: &mut Vec<String>,
@@ -474,7 +476,7 @@ fn build_scan_report(
         Vec::new()
     } else {
         let take = outcome.bad_sectors.len().min(1000);
-        match platform.map_sectors_to_files(drive.number, &outcome.bad_sectors[..take]) {
+        match platform.map_sectors_to_files(drive, sector, &outcome.bad_sectors[..take]) {
             Ok(v) => v,
             Err(e) => {
                 log.push(format!("Bad sectors could not be mapped to files: {e}"));

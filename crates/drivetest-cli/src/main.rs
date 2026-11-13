@@ -265,18 +265,16 @@ fn find_drive(p: &dyn Platform, disk: u32) -> Result<DriveInfo, String> {
 /// capacity, sector size) and, when given, this exact volume.
 fn load_report_for(p: &dyn Platform, disk: u32, path: &std::path::Path, mount: Option<&str>) -> Result<Report, String> {
     let r = Report::load(path).map_err(|e| format!("Could not read {}: {e}", path.display()))?;
-    let d = find_drive(p, disk)?;
-    let same = drivetest_core::model::normalize_serial(&r.drive.serial)
-        == drivetest_core::model::normalize_serial(&d.serial)
-        && !d.serial.trim().is_empty()
-        && r.drive.size_bytes == d.size_bytes
-        && r.drive.logical_sector_size == d.logical_sector_size;
-    if !same {
-        return Err(format!(
-            "{} was made for a different drive ({}), not disk {disk}.",
-            path.display(),
-            r.drive.title()
-        ));
+    if r.schema != drivetest_core::report::REPORT_SCHEMA || r.platform != p.name() {
+        return Err("The report schema or platform does not match this app.".into());
+    }
+    let drives = p.enumerate().map_err(|error| error.to_string())?;
+    let mut matches = drives.iter().filter(|drive| drive.matches_report_device(&r.drive));
+    let Some(d) = matches.next().filter(|drive| drive.number == disk) else {
+        return Err(format!("{} does not identify disk {disk}.", path.display()));
+    };
+    if matches.next().is_some() {
+        return Err("More than one attached device matches the report.".into());
     }
     if let Some(m) = mount {
         let then = r.drive.volume_by_mount(m).map(|v| v.id.clone());
@@ -346,6 +344,7 @@ fn main() -> ExitCode {
             allow_zero_unreadable,
             report,
         } => {
+            let mut report_drive = None;
             let slower = slower_than_ms.map(|ms| (ms * 1000.0) as u32);
             let kind = match kind {
                 WriteKindArg::Full => WriteTestKind::FullWriteVerify,
@@ -363,7 +362,11 @@ fn main() -> ExitCode {
                         None => Vec::new(),
                         Some(p) => match load_report_for(&*platform, disk, p, None) {
                             Ok(r) => match r.scan {
-                                Some(s) => s.bad_sectors,
+                                Some(s) if !s.bad_sectors.is_empty() => {
+                                    report_drive = Some(DriveInfo { number: disk, ..r.drive });
+                                    s.bad_sectors
+                                }
+                                Some(_) => return exit_error("The report contains no unreadable sectors.".into()),
                                 None => return exit_error(format!("{} is not a scan report.", p.display())),
                             },
                             Err(e) => return exit_error(e),
@@ -373,7 +376,7 @@ fn main() -> ExitCode {
                 }
             };
             let mode = if read_write { Mode::ReadWrite } else { Mode::ReadOnly };
-            write_test(platform, disk, kind, mode, confirm_serial, &report)
+            write_test(platform, disk, report_drive, kind, mode, confirm_serial, &report)
         }
         Command::StaleCheck { disk, volume, max_files, report } => {
             let config = StaleConfig { max_files, ..Default::default() };
@@ -389,6 +392,7 @@ fn main() -> ExitCode {
             system_disk_opt_in,
             report,
         } => {
+            let mut report_drive = None;
             let mut config = match (&from_report, folder, whole_volume) {
                 (Some(p), _, _) => match load_report_for(&*platform, disk, p, Some(&volume)) {
                     Err(e) => return exit_error(e),
@@ -398,6 +402,7 @@ fn main() -> ExitCode {
                                 paths: st.slow_files.iter().map(|f| f.path.clone()).collect(),
                             });
                             c.before_mb_s = st.speeds();
+                            report_drive = Some(DriveInfo { number: disk, ..r.drive });
                             c
                         }
                         Some(_) => return exit_error(format!("{} was made for a different volume.", p.display())),
@@ -415,7 +420,7 @@ fn main() -> ExitCode {
             config.measure_after = true;
             let mode = if read_write { Mode::ReadWrite } else { Mode::ReadOnly };
             let kind = JobKind::FileRefresh { mount: volume, config, system_opt_in: system_disk_opt_in };
-            job(platform, disk, kind, mode, None, &report)
+            job_for_selection(platform, disk, report_drive, kind, mode, None, &report)
         }
         Command::SpeedClass { disk, volume, read_write, claimed, test_gb, report } => {
             let claimed = if claimed.is_empty() {
@@ -602,12 +607,13 @@ fn print_health(d: &DriveInfo, snap: &HealthSnapshot) {
 fn write_test(
     platform: Arc<dyn Platform>,
     disk: u32,
+    expected: Option<DriveInfo>,
     kind: WriteTestKind,
     mode: Mode,
     confirm_serial: Option<String>,
     report: &ReportArgs,
 ) -> Result<u8, String> {
-    let d = find_drive(&*platform, disk)?;
+    let d = resolve_selection(&*platform, disk, expected.as_ref())?;
     if let Err(e) = Policy::new(mode).check(&d, Tier::Destructive) {
         eprintln!("{e}");
         if mode == Mode::ReadOnly && !d.is_protected() {
@@ -652,7 +658,7 @@ fn write_test(
         eprintln!("The serial number does not match. Nothing was written.");
         return Ok(EXIT_REFUSED);
     }
-    job(platform, disk, JobKind::WriteTest(cfg), mode, Some(serial), report)
+    job_for_selection(platform, disk, Some(d), JobKind::WriteTest(cfg), mode, Some(serial), report)
 }
 
 fn job(
@@ -663,7 +669,34 @@ fn job(
     confirm_serial: Option<String>,
     report_args: &ReportArgs,
 ) -> Result<u8, String> {
-    let drive = find_drive(&*platform, disk)?;
+    job_for_selection(platform, disk, None, kind, mode, confirm_serial, report_args)
+}
+
+fn resolve_selection(platform: &dyn Platform, disk: u32, expected: Option<&DriveInfo>) -> Result<DriveInfo, String> {
+    let current = find_drive(platform, disk)?;
+    if expected.is_some_and(|expected| !current.same_device(expected)) {
+        return Err("The selected device changed before the job started.".into());
+    }
+    Ok(current)
+}
+
+fn job_for_selection(
+    platform: Arc<dyn Platform>,
+    disk: u32,
+    expected: Option<DriveInfo>,
+    kind: JobKind,
+    mode: Mode,
+    confirm_serial: Option<String>,
+    report_args: &ReportArgs,
+) -> Result<u8, String> {
+    let drive = resolve_selection(&*platform, disk, expected.as_ref())?;
+    if let (Some(expected), JobKind::FileRefresh { mount, .. }) = (&expected, &kind)
+        && expected.volume_by_mount(mount).map(|volume| &volume.id)
+            != drive.volume_by_mount(mount).map(|volume| &volume.id)
+    {
+        return Err("The selected volume changed before the job started.".into());
+    }
+
     let precheck =
         if matches!(kind, JobKind::FileRefresh { .. }) { Ok(()) } else { Policy::new(mode).check(&drive, kind.tier()) };
     if let Err(e) = precheck {

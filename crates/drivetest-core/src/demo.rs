@@ -716,8 +716,11 @@ impl Platform for DemoPlatform {
         Ok(self.drives.iter().map(|d| d.info.clone()).collect())
     }
 
-    fn open_read(&self, disk: u32) -> io::Result<Box<dyn RawReader>> {
-        Ok(Box::new(self.open(disk)?))
+    fn open_read(&self, expected: &DriveInfo) -> io::Result<Box<dyn RawReader>> {
+        if !self.drive(expected.number)?.info.same_device(expected) {
+            return Err(io::Error::other("The selected disk changed"));
+        }
+        Ok(Box::new(self.open(expected.number)?))
     }
 
     fn open_write(&self, auth: &WriteAuthorization) -> io::Result<Box<dyn RawWriter>> {
@@ -896,8 +899,13 @@ impl Platform for DemoPlatform {
         Ok((total, Duration::from_secs_f64(total as f64 / 1e6 / mb_s)))
     }
 
-    fn map_sectors_to_files(&self, disk: u32, lbas: &[u64]) -> Result<Vec<SectorFile>, PlatformError> {
-        let d = self.drive(disk)?;
+    fn map_sectors_to_files(
+        &self,
+        drive: &DriveInfo,
+        _sector: u32,
+        lbas: &[u64],
+    ) -> Result<Vec<SectorFile>, PlatformError> {
+        let d = self.drive(drive.number)?;
         let mount = d.info.volumes.first().and_then(|v| v.mount_points.first()).cloned().unwrap_or_default();
         let files = ["Videos\\holiday-2019.mp4", "Backups\\photos-2021.zip", "Projects\\budget.xlsx"];
         Ok(lbas
